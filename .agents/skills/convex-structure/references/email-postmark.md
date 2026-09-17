@@ -1,16 +1,16 @@
-# Email — Postmark via Convex Seam
+# Send email with Postmark through Convex
 
-Reference for the convex-structure skill. Postmark provides high-deliverability transactional email delivery, webhook tracking for delivery events, bounces, and spam complaints, and server token secret isolation.
+Use this reference when a product brief selects Postmark for transactional email. Keep the server token in Convex, use Postmark's test token before launch, and authenticate webhooks with HTTP Basic Auth or a configured custom header.
 
-## The pieces
+## Understand the integration pieces
 
 | Piece | Owner | Job |
 | --- | --- | --- |
 | Postmark API | Postmark (vendor) | Transactional email delivery, bounce classification, reputation monitoring |
-| `convex/email.ts` | this repo | The email seam — wraps email dispatch and test-mode safety gates |
-| `convex/http.ts` | this repo | Mounts `/postmark/webhook` endpoint with constant-time webhook signature verification |
+| `convex/email.ts` | this repo | The email seam wraps email dispatch and test-mode safety gates |
+| `convex/http.ts` | this repo | Mounts `/postmark/webhook` with constant-time authentication checks |
 
-## Setup & Secret Requirements
+## Configure Postmark
 
 Postmark uses Server API Tokens to authenticate outbound requests and custom webhook headers / HTTP Basic Auth to authenticate inbound webhooks.
 
@@ -21,25 +21,25 @@ Postmark uses Server API Tokens to authenticate outbound requests and custom web
      ```bash
      pnpm secret:set POSTMARK_SERVER_TOKEN
      ```
-   - Hidden input pipes the token straight into the Convex environment — never into chat, git, or `.env.local`.
+   - Hidden input pipes the token straight into the Convex environment. It never enters chat, git, or `.env.local`.
 3. **Register Webhook**:
    - In the Postmark Dashboard under **Server → Webhooks**, register the endpoint:
      `https://<deployment>.convex.site/postmark/webhook`
    - Select event triggers: **Delivery**, **Bounce**, and **Spam Complaint**.
-   - Configure a webhook secret header (e.g. `X-Postmark-Secret`) or HTTP Basic Auth credentials.
+   - Configure `X-Postmark-Secret` as a custom header, or use HTTP Basic Auth with `postmark` as the username.
    - Store the secret in the Convex deployment environment:
      ```bash
      pnpm secret:set POSTMARK_WEBHOOK_SECRET
      ```
 
-## Non-production verification mode
+## Test without delivering email
 
 `convex/email.ts` maintains `testMode: true` during local development:
-- In test mode, email dispatch uses Postmark's test token (`POSTMARK_API_TEST`) or routes only to allowlisted recipient sinks.
+- In test mode, email dispatch must replace the configured server token with `POSTMARK_API_TEST`. Disabling tracking does not prevent delivery.
 - In test mode, `requireEmailVerification` in `convex/auth.ts` remains `false`.
 - Turning on `requireEmailVerification` while `testMode: true` is active will lock out real signups, which `pnpm health` flags as a critical configuration defect.
 
-## Going to production
+## Prepare Postmark for production
 
 1. **Verify Sending Domain**: Set up DKIM and custom Return-Path DNS records in the Postmark dashboard under **Sender Signatures / Domains**.
 2. **Set Sender Address**:
@@ -51,16 +51,16 @@ Postmark uses Server API Tokens to authenticate outbound requests and custom web
    - In `convex/email.ts`, set `testMode: false`.
    - In `convex/auth.ts`, set `requireEmailVerification: true`.
    - Both flags flip together for production go-live.
-4. **Preflight Gate**: Run `pnpm preflight` (and `pnpm preflight --prod`) to verify the configuration before deployment.
+4. **Preflight gate**: Run `pnpm preflight --prod`. It verifies the live server token, active transactional message stream, authenticated webhook, sender identity, and live sending. The live check sends one message to Postmark's `test@blackhole.postmarkapp.com` sink. Postmark discards it, but it counts toward monthly volume.
 
 ## Webhook verification
 
 `convex/http.ts` mounts `/postmark/webhook`.
-- The webhook endpoint extracts the authentication secret from incoming headers (`X-Postmark-Secret`, `X-Webhook-Secret`, or `Authorization: Bearer <secret>`).
-- Webhook verification uses `crypto.timingSafeEqual` over buffer representations to prevent timing attacks.
+- Postmark does not sign webhooks. The endpoint compares the configured `X-Postmark-Secret` header or the complete HTTP Basic Auth credential in constant time.
 - Missing, mismatched, or unauthenticated requests return 401/403 immediately before invoking internal mutations.
+- Prefer `X-PM-Webhook-Trace-Id` as the idempotency key. If it is absent, use a compound key. A delivery key includes `MessageID`, `Recipient`, and `DeliveredAt` because one message can have several recipients.
 
-## Bounce & complaint handling
+## Handle bounces and complaints
 
 Postmark categorizes email lifecycle events into distinct record types:
 
@@ -68,12 +68,12 @@ Postmark categorizes email lifecycle events into distinct record types:
 | --- | --- | --- |
 | **Delivery** | `Delivery` | Records delivery confirmation and timestamp for message tracking. |
 | **Hard Bounce** | `Bounce` (TypeCode 1) | Automatically flags recipient email as `inactive: true` to prevent sender reputation degradation. |
-| **Soft Bounce** | `Bounce` (TypeCode 512) | Records temporary bounce failure without permanently deactivating the recipient. |
+| **Soft Bounce** | `Bounce` (TypeCode 4096) | Records temporary bounce failure without permanently deactivating the recipient. |
 | **Spam Complaint** | `SpamComplaint` | Flags recipient as `inactive: true`, unsubscribes recipient, and flags notification. |
 
-All webhook handlers process events idempotently by tracking `MessageID` / `deliveryId` in internal tables. Retried webhooks are safely acknowledged without duplicate side effects.
+Postmark retries temporary failures. Return a non-2xx response when processing fails so Postmark can retry. A 4xx response is permanent and is not retried.
 
-## Provider replacement (Resend ↔ Postmark)
+## Replace Resend or Postmark
 
 To replace Resend with Postmark or vice versa:
 1. Update `providerSelection.email` in the product brief.

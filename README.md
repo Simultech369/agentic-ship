@@ -149,6 +149,25 @@ pnpm onboard polar --host codex
 pnpm onboard lemonsqueezy --host codex
 ```
 
+### Choose an email provider
+
+Product briefs select one email provider through `providerSelection.email`. Resend is
+the default. Postmark is the supported alternative. Both keep credentials in Convex
+and remain in test mode until the sending domain and email verification checks pass.
+
+```bash
+pnpm onboard resend --host codex
+pnpm onboard postmark --host codex
+```
+
+Read the [Resend guide](.agents/skills/convex-structure/references/email-resend.md) or
+the [Postmark guide](.agents/skills/convex-structure/references/email-postmark.md)
+before production. Postmark test mode uses `POSTMARK_API_TEST`, which validates a
+message without delivering it. Postmark webhooks use HTTP Basic Auth or a configured
+custom header because Postmark does not sign webhook payloads. Production preflight
+sends one message to Postmark's black-hole sink to verify the live token, sender,
+message stream, and webhook without contacting a person.
+
 ### Choose a deployment provider
 
 Product briefs select one deployment provider through `providerSelection.deployment`.
@@ -181,7 +200,7 @@ honest question is not "is it supported" but how much code a swap touches:
 | Want instead | Wired today | Swap cost |
 | --- | --- | --- |
 | Plausible, Umami | PostHog | small — `src/lib/analytics.ts` is the only file that imports the SDK |
-| Postmark, SendGrid | Resend | medium — `convex/email.ts` is the only sender, but the Convex component and its webhook go with it |
+| SendGrid | Resend, Postmark | medium: add one provider-owned adapter, connection entry, lifecycle fixture, and production check |
 | Paddle | Stripe, Polar, Lemon Squeezy | medium: add one provider-owned adapter, connection entry, lifecycle fixture, and production check |
 | Clerk, Auth.js | Better Auth | medium — session truth is one query behind `requireUser`, but the Convex adapter is load-bearing |
 | Supabase, Postgres + Prisma | Convex | large — Convex is the spine; the auth, billing, and email components all ride it. Swapping it means rebuilding those seams |

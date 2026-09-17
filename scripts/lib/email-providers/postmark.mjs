@@ -1,13 +1,36 @@
 import { timingSafeEqual } from "node:crypto";
 
+export function inspectPostmarkBlueprint({ emailSource = "", httpSource = "" } = {}) {
+  const missing = [];
+  const emailRules = [
+    ["Postmark provider seam", /postmark/i],
+    ["server token", /POSTMARK_SERVER_TOKEN/],
+    ["non-delivery test token", /POSTMARK_API_TEST/],
+    ["shipped test mode", /\btestMode\s*:\s*true\b/],
+    ["suppressed-recipient guard", /inactive|suppress/i],
+  ];
+  const webhookRules = [
+    ["webhook route", /["']\/postmark\/webhook["']/],
+    ["webhook secret", /POSTMARK_WEBHOOK_SECRET/],
+    ["webhook authentication", /verifyPostmarkWebhook|timingSafeEqual/],
+    ["idempotency key", /X-PM-Webhook-Trace-Id|x-pm-webhook-trace-id|processedEventIds/],
+  ];
+  for (const [label, pattern] of emailRules) if (!pattern.test(emailSource)) missing.push(label);
+  for (const [label, pattern] of webhookRules) if (!pattern.test(httpSource)) missing.push(label);
+  return missing.length === 0
+    ? { status: "PASS", detail: "Postmark email and webhook blueprint is complete" }
+    : { status: "FAIL", detail: `Postmark blueprint is incomplete: ${missing.join(", ")}` };
+}
+
 /**
  * Verify inbound Postmark webhook authentication using constant-time comparison.
- * Supports X-Postmark-Secret, X-Webhook-Secret, Bearer authorization, and Basic auth.
+ * Postmark does not sign webhooks. Downstream projects configure either the
+ * X-Postmark-Secret custom header or HTTP Basic Auth with the fixed username.
  *
- * @param {{ headers?: Record<string, string>, rawBody?: string, secret?: string }} options
+ * @param {{ headers?: Record<string, string>, secret?: string, username?: string }} options
  * @returns {boolean}
  */
-export function verifyPostmarkWebhook({ headers = {}, secret = "" } = {}) {
+export function verifyPostmarkWebhook({ headers = {}, secret = "", username = "postmark" } = {}) {
   if (!secret || typeof secret !== "string" || secret.trim().length === 0) return false;
 
   const normalizedHeaders = {};
@@ -17,25 +40,15 @@ export function verifyPostmarkWebhook({ headers = {}, secret = "" } = {}) {
     }
   }
 
-  let candidate = null;
+  let candidate = normalizedHeaders["x-postmark-secret"] ?? null;
+  let expected = secret;
 
-  if (normalizedHeaders["x-postmark-secret"]) {
-    candidate = normalizedHeaders["x-postmark-secret"];
-  } else if (normalizedHeaders["x-webhook-secret"]) {
-    candidate = normalizedHeaders["x-webhook-secret"];
-  } else if (normalizedHeaders["authorization"]) {
+  if (!candidate && normalizedHeaders["authorization"]) {
     const auth = normalizedHeaders["authorization"].trim();
-    if (auth.startsWith("Bearer ")) {
-      candidate = auth.slice(7).trim();
-    } else if (auth.startsWith("Basic ")) {
+    if (auth.startsWith("Basic ")) {
       try {
-        const decoded = Buffer.from(auth.slice(6).trim(), "base64").toString("utf8");
-        const parts = decoded.split(":");
-        if (parts.length === 2) {
-          candidate = parts[1] || parts[0];
-        } else {
-          candidate = decoded;
-        }
+        candidate = Buffer.from(auth.slice(6).trim(), "base64").toString("utf8");
+        expected = `${username}:${secret}`;
       } catch {
         return false;
       }
@@ -45,7 +58,7 @@ export function verifyPostmarkWebhook({ headers = {}, secret = "" } = {}) {
   if (!candidate || typeof candidate !== "string") return false;
 
   const candidateBuf = Buffer.from(candidate, "utf8");
-  const secretBuf = Buffer.from(secret, "utf8");
+  const secretBuf = Buffer.from(expected, "utf8");
 
   if (candidateBuf.length !== secretBuf.length) return false;
   return timingSafeEqual(candidateBuf, secretBuf);
@@ -60,8 +73,22 @@ export function createPostmarkDeliveryState() {
     bouncedCount: 0,
     complaintCount: 0,
     recipients: {},
-    processedDeliveryIds: [],
+    processedEventIds: [],
   };
+}
+
+function eventId(event, traceId) {
+  if (traceId) return `trace:${traceId}`;
+  const type = event.RecordType || event.type || "";
+  if (type === "Delivery") {
+    return [type, event.MessageID, event.Recipient || event.email, event.DeliveredAt || event.occurredAt].join(":");
+  }
+  return [
+    type,
+    event.ID || event.MessageID || event.deliveryId,
+    event.Email || event.Recipient || event.email,
+    event.BouncedAt || event.occurredAt || event.ReceivedAt,
+  ].join(":");
 }
 
 /**
@@ -69,27 +96,33 @@ export function createPostmarkDeliveryState() {
  *
  * @param {object} current current state
  * @param {object} event webhook event payload
- * @returns {{ outcome: "applied"|"ignored_duplicate"|"rejected_unverified", state: object }}
+ * @param {{ authenticated?: boolean, traceId?: string }} [options] authentication result and X-PM-Webhook-Trace-Id
+ * @returns {{ outcome: "applied"|"ignored_duplicate"|"ignored_unsupported"|"rejected_unverified", state: object }}
  */
-export function applyPostmarkEvent(current, event) {
+export function applyPostmarkEvent(current, event, { authenticated = false, traceId = "" } = {}) {
   const state = current ?? createPostmarkDeliveryState();
-  if (event?.verified !== true) {
+  if (!authenticated) {
     return { outcome: "rejected_unverified", state };
   }
 
-  const deliveryId = String(event.MessageID || event.ID || event.deliveryId || "");
   const eventType = event.RecordType || event.type || "";
   const occurredAt = event.DeliveredAt || event.BouncedAt || event.occurredAt || event.ReceivedAt || "";
 
-  if (!deliveryId || !eventType || !occurredAt) {
+  if (!(event.MessageID || event.ID || event.deliveryId) || !eventType || !occurredAt) {
     throw new Error("verified Postmark events need MessageID/ID, RecordType/type, and DeliveredAt/BouncedAt/occurredAt");
   }
 
-  if (state.processedDeliveryIds.includes(deliveryId)) {
+  if (!["Delivery", "Bounce", "SpamComplaint"].includes(eventType)) {
+    return { outcome: "ignored_unsupported", state };
+  }
+
+  const processedEventIds = state.processedEventIds ?? [];
+  const id = eventId(event, traceId);
+  if (processedEventIds.includes(id)) {
     return { outcome: "ignored_duplicate", state };
   }
 
-  const updatedDeliveryIds = [...state.processedDeliveryIds, deliveryId];
+  const updatedEventIds = [...processedEventIds, id];
 
   switch (eventType) {
     case "Delivery": {
@@ -108,7 +141,7 @@ export function applyPostmarkEvent(current, event) {
           ...state,
           deliveredCount: state.deliveredCount + 1,
           recipients,
-          processedDeliveryIds: updatedDeliveryIds,
+          processedEventIds: updatedEventIds,
         },
       };
     }
@@ -131,7 +164,7 @@ export function applyPostmarkEvent(current, event) {
           ...state,
           bouncedCount: state.bouncedCount + 1,
           recipients,
-          processedDeliveryIds: updatedDeliveryIds,
+          processedEventIds: updatedEventIds,
         },
       };
     }
@@ -153,22 +186,23 @@ export function applyPostmarkEvent(current, event) {
           ...state,
           complaintCount: state.complaintCount + 1,
           recipients,
-          processedDeliveryIds: updatedDeliveryIds,
+          processedEventIds: updatedEventIds,
         },
       };
     }
 
-    case "Open":
-    case "Click":
     default:
-      return {
-        outcome: "applied",
-        state: {
-          ...state,
-          processedDeliveryIds: updatedDeliveryIds,
-        },
-      };
+      return { outcome: "ignored_unsupported", state };
   }
+}
+
+/**
+ * Select the server token without letting test mode deliver real mail.
+ */
+export function resolvePostmarkServerToken({ configuredToken = "", testMode = true } = {}) {
+  if (testMode) return "POSTMARK_API_TEST";
+  if (!configuredToken.trim()) throw new Error("Live Postmark delivery requires POSTMARK_SERVER_TOKEN");
+  return configuredToken.trim();
 }
 
 /**
@@ -190,7 +224,6 @@ export function simulatePostmarkDelivery({
     DeliveredAt: deliveredAt,
     Details: "smtp;250 2.0.0 OK",
     Metadata: metadata,
-    verified: true,
   };
 }
 
@@ -226,7 +259,6 @@ export function simulatePostmarkBounce({
     Inactive: inactive,
     CanActivate: !inactive,
     Subject: "Verify your email",
-    verified: true,
   };
 }
 
@@ -256,7 +288,6 @@ export function simulatePostmarkSpamComplaint({
     Inactive: true,
     CanActivate: false,
     Subject: "Verify your email",
-    verified: true,
   };
 }
 
@@ -272,10 +303,18 @@ export function createPostmarkSendInput({
   tag = "transactional",
   messageStream = "outbound",
   testMode = false,
+  deliveryState,
 }) {
   if (!to || typeof to !== "string") throw new Error("Postmark send requires a recipient (to)");
   if (!from || typeof from !== "string") throw new Error("Postmark send requires a sender (from)");
   if (!subject || typeof subject !== "string") throw new Error("Postmark send requires a subject");
+
+  const recipients = to.split(",").map((value) => {
+    const trimmed = value.trim();
+    return (trimmed.match(/<([^>]+)>$/)?.[1] ?? trimmed).toLowerCase();
+  });
+  const suppressed = recipients.find((recipient) => deliveryState?.recipients?.[recipient]?.inactive === true);
+  if (suppressed) throw new Error(`Postmark recipient is suppressed: ${suppressed}`);
 
   return {
     From: from,

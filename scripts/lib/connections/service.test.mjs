@@ -251,6 +251,22 @@ test("Postmark begins with project provisioning and verifies its real seams", (t
 
   write(projectRoot, "convex/email.ts", 'const provider = "postmark";\nconst config = { testMode: true };');
   write(projectRoot, "convex/http.ts", 'const route = "/postmark/webhook";');
+  const incomplete = service.resume(started.action.actionId);
+  assert.equal(incomplete.type, "input_required");
+  assert.equal(incomplete.action.state, "failed_retryable");
+
+  write(projectRoot, "convex/email.ts", [
+    'const provider = "postmark";',
+    'const config = { testMode: true };',
+    'const token = config.testMode ? "POSTMARK_API_TEST" : process.env.POSTMARK_SERVER_TOKEN;',
+    'if (recipient.inactive) throw new Error("suppressed");',
+  ].join("\n"));
+  write(projectRoot, "convex/http.ts", [
+    'const route = "/postmark/webhook";',
+    'const secret = process.env.POSTMARK_WEBHOOK_SECRET;',
+    'verifyPostmarkWebhook(headers, secret);',
+    'const trace = headers.get("X-PM-Webhook-Trace-Id");',
+  ].join("\n"));
   const ready = service.resume(started.action.actionId);
   assert.equal(ready.type, "connection_ready");
   assert.equal(ready.verification.agentTool.required, false);

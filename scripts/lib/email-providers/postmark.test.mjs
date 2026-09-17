@@ -4,13 +4,16 @@ import {
   applyPostmarkEvent,
   createPostmarkDeliveryState,
   createPostmarkSendInput,
+  resolvePostmarkServerToken,
   simulatePostmarkBounce,
   simulatePostmarkDelivery,
   simulatePostmarkSpamComplaint,
   verifyPostmarkWebhook,
 } from "./postmark.mjs";
 
-describe("Postmark webhook signature and auth verification", () => {
+const apply = (state, event, options = {}) => applyPostmarkEvent(state, event, { authenticated: true, ...options });
+
+describe("Postmark webhook authentication", () => {
   const SECRET = ["fixture", "webhook", "secret", "value"].join("-");
 
   test("verifies valid X-Postmark-Secret header", () => {
@@ -29,22 +32,6 @@ describe("Postmark webhook signature and auth verification", () => {
     expect(verified).toBe(true);
   });
 
-  test("verifies valid X-Webhook-Secret header", () => {
-    const verified = verifyPostmarkWebhook({
-      headers: { "x-webhook-secret": SECRET },
-      secret: SECRET,
-    });
-    expect(verified).toBe(true);
-  });
-
-  test("verifies Bearer token authorization header", () => {
-    const verified = verifyPostmarkWebhook({
-      headers: { authorization: `Bearer ${SECRET}` },
-      secret: SECRET,
-    });
-    expect(verified).toBe(true);
-  });
-
   test("verifies Basic auth header", () => {
     const encoded = Buffer.from(`postmark:${SECRET}`).toString("base64");
     const verified = verifyPostmarkWebhook({
@@ -52,6 +39,25 @@ describe("Postmark webhook signature and auth verification", () => {
       secret: SECRET,
     });
     expect(verified).toBe(true);
+  });
+
+  test("rejects Basic auth with the wrong username", () => {
+    const encoded = Buffer.from(`attacker:${SECRET}`).toString("base64");
+    expect(verifyPostmarkWebhook({
+      headers: { authorization: `Basic ${encoded}` },
+      secret: SECRET,
+    })).toBe(false);
+  });
+
+  test("rejects unconfigured authentication schemes", () => {
+    expect(verifyPostmarkWebhook({
+      headers: { authorization: `Bearer ${SECRET}` },
+      secret: SECRET,
+    })).toBe(false);
+    expect(verifyPostmarkWebhook({
+      headers: { "x-webhook-secret": SECRET },
+      secret: SECRET,
+    })).toBe(false);
   });
 
   test("rejects mismatched secret", () => {
@@ -76,7 +82,7 @@ describe("Postmark event state transitions & simulation", () => {
       recipient: "user@example.com",
     });
 
-    const result = applyPostmarkEvent(initial, event);
+    const result = apply(initial, event);
     expect(result.outcome).toBe("applied");
     expect(result.state.deliveredCount).toBe(1);
     expect(result.state.recipients["user@example.com"]).toEqual({
@@ -84,7 +90,7 @@ describe("Postmark event state transitions & simulation", () => {
       lastEventAt: event.DeliveredAt,
       inactive: false,
     });
-    expect(result.state.processedDeliveryIds).toContain("msg-001");
+    expect(result.state.processedEventIds).toHaveLength(1);
   });
 
   test("hard bounce marks recipient inactive and increments bounced count", () => {
@@ -98,7 +104,7 @@ describe("Postmark event state transitions & simulation", () => {
       inactive: true,
     });
 
-    const result = applyPostmarkEvent(initial, event);
+    const result = apply(initial, event);
     expect(result.outcome).toBe("applied");
     expect(result.state.bouncedCount).toBe(1);
     expect(result.state.recipients["bad-address@example.com"].status).toBe("bounced");
@@ -112,12 +118,12 @@ describe("Postmark event state transitions & simulation", () => {
       messageId: "msg-003",
       email: "mailbox-full@example.com",
       type: "SoftBounce",
-      typeCode: 512,
+      typeCode: 4096,
       name: "Soft bounce",
       inactive: false,
     });
 
-    const result = applyPostmarkEvent(initial, event);
+    const result = apply(initial, event);
     expect(result.outcome).toBe("applied");
     expect(result.state.bouncedCount).toBe(1);
     expect(result.state.recipients["mailbox-full@example.com"].status).toBe("bounced");
@@ -132,7 +138,7 @@ describe("Postmark event state transitions & simulation", () => {
       email: "complainer@example.com",
     });
 
-    const result = applyPostmarkEvent(initial, event);
+    const result = apply(initial, event);
     expect(result.outcome).toBe("applied");
     expect(result.state.complaintCount).toBe(1);
     expect(result.state.recipients["complainer@example.com"].status).toBe("complaint");
@@ -146,13 +152,13 @@ describe("Postmark event state transitions & simulation", () => {
       MessageID: "msg-unverified",
       Recipient: "user@example.com",
       DeliveredAt: new Date().toISOString(),
-      verified: false,
+      verified: true,
     };
 
     const result = applyPostmarkEvent(initial, unverifiedEvent);
     expect(result.outcome).toBe("rejected_unverified");
     expect(result.state.deliveredCount).toBe(0);
-    expect(result.state.processedDeliveryIds).not.toContain("msg-unverified");
+    expect(result.state.processedEventIds).toHaveLength(0);
   });
 
   test("duplicate delivery IDs are safely ignored", () => {
@@ -162,13 +168,48 @@ describe("Postmark event state transitions & simulation", () => {
       recipient: "user@example.com",
     });
 
-    const first = applyPostmarkEvent(initial, event);
+    const first = apply(initial, event);
     expect(first.outcome).toBe("applied");
     expect(first.state.deliveredCount).toBe(1);
 
-    const duplicate = applyPostmarkEvent(first.state, event);
+    const duplicate = apply(first.state, event);
     expect(duplicate.outcome).toBe("ignored_duplicate");
     expect(duplicate.state.deliveredCount).toBe(1);
+  });
+
+  test("the same message can deliver to multiple recipients", () => {
+    const deliveredAt = new Date().toISOString();
+    const first = apply(createPostmarkDeliveryState(), simulatePostmarkDelivery({
+      messageId: "msg-multi-001",
+      recipient: "first@example.com",
+      deliveredAt,
+    }));
+    const second = apply(first.state, simulatePostmarkDelivery({
+      messageId: "msg-multi-001",
+      recipient: "second@example.com",
+      deliveredAt,
+    }));
+
+    expect(second.outcome).toBe("applied");
+    expect(second.state.deliveredCount).toBe(2);
+  });
+
+  test("uses the webhook trace ID as the preferred retry key", () => {
+    const event = simulatePostmarkDelivery({ messageId: "msg-trace-001" });
+    const first = apply(createPostmarkDeliveryState(), event, { traceId: "trace-001" });
+    const duplicate = apply(first.state, { ...event, Recipient: "changed@example.com" }, { traceId: "trace-001" });
+    expect(duplicate.outcome).toBe("ignored_duplicate");
+  });
+});
+
+describe("Postmark test-mode token selection", () => {
+  test("uses Postmark's non-delivery test token in test mode", () => {
+    expect(resolvePostmarkServerToken({ configuredToken: "real-server-token", testMode: true })).toBe("POSTMARK_API_TEST");
+  });
+
+  test("requires a configured server token for live delivery", () => {
+    expect(resolvePostmarkServerToken({ configuredToken: "real-server-token", testMode: false })).toBe("real-server-token");
+    expect(() => resolvePostmarkServerToken({ testMode: false })).toThrow(/POSTMARK_SERVER_TOKEN/);
   });
 });
 
@@ -212,5 +253,16 @@ describe("Postmark send input creation", () => {
     expect(() => createPostmarkSendInput({ from: "a@b.com", subject: "test" })).toThrow(/recipient/);
     expect(() => createPostmarkSendInput({ to: "a@b.com", subject: "test" })).toThrow(/sender/);
     expect(() => createPostmarkSendInput({ to: "a@b.com", from: "b@c.com" })).toThrow(/subject/);
+  });
+
+  test("refuses a recipient suppressed by a hard bounce or complaint", () => {
+    const deliveryState = createPostmarkDeliveryState();
+    deliveryState.recipients["blocked@example.com"] = { inactive: true, status: "bounced" };
+    expect(() => createPostmarkSendInput({
+      to: "Blocked <blocked@example.com>",
+      from: "sender@example.com",
+      subject: "Do not send",
+      deliveryState,
+    })).toThrow(/recipient is suppressed/);
   });
 });

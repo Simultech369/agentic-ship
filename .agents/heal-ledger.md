@@ -834,3 +834,19 @@ Format:
   README sync gate prevents a supported deployment provider from remaining in the
   reader-facing "not wired" list.
 - status: open
+
+## 2026-09-17 postmark-provider-false-green-readiness
+
+- cause: the initial Postmark adapter treated `testMode` and disabled tracking as
+  non-delivery safety, trusted a payload-owned `verified` field, deduplicated delivery
+  events by `MessageID` alone, and called production ready from environment-variable
+  names without checking the live provider.
+- fix: test mode now selects `POSTMARK_API_TEST`, authenticated state stays outside the
+  payload, delivery events prefer Postmark's trace ID or a recipient-specific compound
+  key, suppressed recipients cannot be sent to, and production preflight verifies the
+  live token, transactional stream, authenticated webhook, sender, and black-hole send.
+- prevention: the connection probe now validates one complete Postmark blueprint,
+  provider boundary tests cover spoofed authentication and multi-recipient retries,
+  the live verifier uses mocked remote failure cases, and README sync covers supported
+  billing and email providers as well as deployment providers.
+- status: open

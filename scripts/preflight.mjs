@@ -20,6 +20,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectProductionBillingEnvironment } from "./lib/billing-coherence.mjs";
 import { inspectDeploymentBlueprint } from "./lib/deployment-coherence.mjs";
+import { verifyPostmarkLive } from "./lib/email-providers/postmark-live.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : "");
@@ -152,10 +153,29 @@ if (withProd) {
 
     const billing = inspectProductionBillingEnvironment(env);
     add("prod billing provider is live", billing.status === "PASS" ? "PASS" : "FAIL", billing.status === "PASS" ? "" : billing.detail);
-    const isPostmark = val("EMAIL_PROVIDER") === "postmark" || has("POSTMARK_SERVER_TOKEN");
+    const emailProvider = val("EMAIL_PROVIDER") || "resend";
+    const multipleEmailProviders = has("RESEND_API_KEY") && has("POSTMARK_SERVER_TOKEN");
+    add(
+      "one production email provider selected",
+      multipleEmailProviders ? "FAIL" : "PASS",
+      multipleEmailProviders ? "remove the unselected provider credential from the production Convex environment" : "",
+    );
+    const isPostmark = emailProvider === "postmark";
     if (isPostmark) {
       add("prod Postmark token set", has("POSTMARK_SERVER_TOKEN") ? "PASS" : "FAIL", "production sends no email without it");
+      try {
+        const live = await verifyPostmarkLive({
+          serverToken: val("POSTMARK_SERVER_TOKEN"),
+          webhookSecret: val("POSTMARK_WEBHOOK_SECRET"),
+          from: val("EMAIL_FROM"),
+          messageStream: val("POSTMARK_MESSAGE_STREAM") || "outbound",
+        });
+        add("prod Postmark is live", live.status, live.detail);
+      } catch (error) {
+        add("prod Postmark is live", "FAIL", error instanceof Error ? error.message : "Postmark live verification failed");
+      }
     } else {
+      add("prod email provider is supported", emailProvider === "resend" ? "PASS" : "FAIL", `unsupported EMAIL_PROVIDER: ${emailProvider}`);
       add("prod Resend key set", has("RESEND_API_KEY") ? "PASS" : "FAIL", "production sends no email without it");
     }
     add("prod EMAIL_FROM on a verified domain", has("EMAIL_FROM") && !/resend\.dev|example\.com/.test(val("EMAIL_FROM")) ? "PASS" : "FAIL", "EMAIL_FROM missing or still the onboarding fallback — verify a sending domain and set it");

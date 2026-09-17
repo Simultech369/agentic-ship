@@ -572,8 +572,14 @@ The product brief selects one email provider: Resend remains the default; Postma
   It flips to `false` **together with** `requireEmailVerification: true` in
   `convex/auth.ts`, after a sending domain is verified. `pnpm health` fails on either
   half of that pair being wrong.
-- Webhook routes (`/resend-webhook` or `/postmark/webhook` in `convex/http.ts`) verify signatures and
-  process delivery and bounce events idempotently. Never parse a webhook body without cryptographic verification.
+- `/resend-webhook` verifies Resend signatures. Postmark does not sign webhooks, so
+  `/postmark/webhook` requires HTTP Basic Auth or a configured custom header. Prefer
+  Postmark's trace ID for idempotency, then fall back to an event-specific compound key.
+- In Postmark test mode, use `POSTMARK_API_TEST` as the server token. Disabling open
+  and link tracking does not prevent delivery.
+- Postmark production preflight verifies the live token, transactional stream,
+  authenticated webhook, and sender by sending one message to Postmark's black-hole
+  sink. The sink does not contact a person, but the message counts toward monthly volume.
 
 ## Analytics rules (PostHog, wired)
 
