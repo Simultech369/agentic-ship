@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { verifyPostmarkLive } from "./postmark-live.mjs";
 
 const secret = ["fixture", "postmark", "webhook", "value"].join("-");
+const serverToken = ["fixture", "postmark", "server", "value"].join("-");
 
 function response(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -39,7 +40,7 @@ function workingFetch() {
 
 function options(overrides = {}) {
   return {
-    serverToken: "server-token-fixture",
+    serverToken,
     webhookSecret: secret,
     from: "Product <support@product.com>",
     fetchImpl: workingFetch(),
@@ -53,7 +54,7 @@ describe("Postmark production verification", () => {
     await expect(verifyPostmarkLive(input)).resolves.toMatchObject({ status: "PASS" });
     const send = input.fetchImpl.mock.calls.find(([url]) => url.endsWith("/email"));
     expect(JSON.parse(send[1].body).To).toBe("test@blackhole.postmarkapp.com");
-    expect(send[1].headers["X-Postmark-Server-Token"]).toBe("server-token-fixture");
+    expect(send[1].headers["X-Postmark-Server-Token"]).toBe(serverToken);
   });
 
   it("rejects the non-delivery test token for production", async () => {
@@ -114,6 +115,6 @@ describe("Postmark production verification", () => {
 
   it("does not expose the token in remote failures", async () => {
     const fetchImpl = vi.fn(async () => response({ Message: "bad token" }, 401));
-    await expect(verifyPostmarkLive(options({ fetchImpl }))).rejects.not.toThrow(/server-token-fixture/);
+    await expect(verifyPostmarkLive(options({ fetchImpl }))).rejects.not.toThrow(new RegExp(serverToken));
   });
 });

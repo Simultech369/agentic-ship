@@ -203,12 +203,14 @@ describe("Postmark event state transitions & simulation", () => {
 });
 
 describe("Postmark test-mode token selection", () => {
+  const configuredToken = ["fixture", "configured", "value"].join("-");
+
   test("uses Postmark's non-delivery test token in test mode", () => {
-    expect(resolvePostmarkServerToken({ configuredToken: "real-server-token", testMode: true })).toBe("POSTMARK_API_TEST");
+    expect(resolvePostmarkServerToken({ configuredToken, testMode: true })).toBe("POSTMARK_API_TEST");
   });
 
   test("requires a configured server token for live delivery", () => {
-    expect(resolvePostmarkServerToken({ configuredToken: "real-server-token", testMode: false })).toBe("real-server-token");
+    expect(resolvePostmarkServerToken({ configuredToken, testMode: false })).toBe(configuredToken);
     expect(() => resolvePostmarkServerToken({ testMode: false })).toThrow(/POSTMARK_SERVER_TOKEN/);
   });
 });
