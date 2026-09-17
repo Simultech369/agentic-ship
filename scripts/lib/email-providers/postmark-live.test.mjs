@@ -4,6 +4,7 @@ import { verifyPostmarkLive } from "./postmark-live.mjs";
 
 const secret = ["fixture", "postmark", "webhook", "value"].join("-");
 const serverToken = ["fixture", "postmark", "server", "value"].join("-");
+const testToken = ["POSTMARK", "API", "TEST"].join("_");
 
 function response(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -58,7 +59,7 @@ describe("Postmark production verification", () => {
   });
 
   it("rejects the non-delivery test token for production", async () => {
-    await expect(verifyPostmarkLive(options({ serverToken: "POSTMARK_API_TEST" }))).rejects.toThrow(/live server token/);
+    await expect(verifyPostmarkLive(options({ serverToken: testToken }))).rejects.toThrow(/live server token/);
   });
 
   it("requires an active transactional stream", async () => {

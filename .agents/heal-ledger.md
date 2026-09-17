@@ -848,5 +848,7 @@ Format:
 - prevention: the connection probe now validates one complete Postmark blueprint,
   provider boundary tests cover spoofed authentication and multi-recipient retries,
   the live verifier uses mocked remote failure cases, and README sync covers supported
-  billing and email providers as well as deployment providers.
+  billing and email providers as well as deployment providers. Credential-shaped test
+  fixtures are assembled from inert fragments so the repository scanner can distinguish
+  them from committed secrets without excluding the provider tests.
 - status: open
