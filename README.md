@@ -168,6 +168,21 @@ custom header because Postmark does not sign webhook payloads. Production prefli
 sends one message to Postmark's black-hole sink to verify the live token, sender,
 message stream, and webhook without contacting a person.
 
+### Add optional observability
+
+Sentry is optional. When selected, the official Next.js SDK covers browser, server,
+and edge errors through one scrubber seam. Convex errors use Convex's dashboard-owned
+Sentry integration. Builds stay green when observability is not selected.
+
+```bash
+pnpm onboard sentry --host codex
+```
+
+Read the [Sentry guide](.agents/skills/convex-structure/references/observability-sentry.md)
+before production. The gate checks privacy redaction, quiet local development, release
+identity, and source-map upload configuration. A human verification confirms one
+synthetic event and the Convex dashboard integration.
+
 ### Choose a deployment provider
 
 Product briefs select one deployment provider through `providerSelection.deployment`.
@@ -189,8 +204,9 @@ the [Vercel guide](.agents/skills/convex-structure/references/deploy-vercel.md),
 before production. `pnpm preflight` rejects a stale build command or multiple active
 deployment adapters. Cloudflare production preflight also requires live proof for the
 deployed Worker, custom domain, preview, auth, Convex query, and webhook routes.
-`pnpm check:readme` keeps this supported-provider list synchronized with the connection
-catalog so a newly wired deployment provider cannot remain in the "not wired" table.
+`pnpm check:readme` keeps the supported billing, email, deployment, and observability
+providers synchronized with the connection catalog so reader-facing setup does not go
+stale.
 
 ### Not wired yet, and what a swap costs
 

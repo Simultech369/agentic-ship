@@ -20,6 +20,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectProductionBillingEnvironment } from "./lib/billing-coherence.mjs";
 import { inspectDeploymentBlueprint } from "./lib/deployment-coherence.mjs";
+import { inspectSentryBlueprint } from "./lib/observability/sentry.mjs";
 import { verifyPostmarkLive } from "./lib/email-providers/postmark-live.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -116,6 +117,24 @@ add(
   localBillingSecret ? "FAIL" : "PASS",
   localBillingSecret ? "production billing secrets belong in the production Convex deployment environment" : "",
 );
+const localSentryAuthSecret = /^NEXT_PUBLIC_SENTRY_AUTH_TOKEN=/m.test(envLocal);
+add(
+  "no sensitive Sentry auth token in client env",
+  localSentryAuthSecret ? "FAIL" : "PASS",
+  localSentryAuthSecret ? "NEXT_PUBLIC_SENTRY_AUTH_TOKEN leaks Sentry auth token to the browser bundle — use SENTRY_AUTH_TOKEN in CI/build only" : "",
+);
+
+const sentryBlueprint = inspectSentryBlueprint({
+  packageJsonSource: read("package.json"),
+  observabilitySource: read("src/lib/observability.ts") || read("src/lib/observability.js"),
+  clientSource: read("instrumentation-client.ts") || read("instrumentation-client.js") || read("sentry.client.config.ts") || read("sentry.client.config.js"),
+  serverSource: read("sentry.server.config.ts") || read("sentry.server.config.js"),
+  edgeSource: read("sentry.edge.config.ts") || read("sentry.edge.config.js"),
+  nextConfigSource: read("next.config.ts") || read("next.config.mjs") || read("next.config.js"),
+});
+if (sentryBlueprint.status !== "SKIP") {
+  add("Sentry runtime and source-map blueprint", sentryBlueprint.status, sentryBlueprint.status === "PASS" ? "" : sentryBlueprint.detail);
+}
 
 /* ---------- the full local gate ---------- */
 

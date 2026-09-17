@@ -3,10 +3,10 @@ import { join, resolve } from "node:path";
 
 const IDENTIFIER = /^[a-z][a-z0-9-]*$/;
 const PLACEHOLDER = /\{([a-z][a-z0-9-]*)\}/g;
-const PROBE_TYPES = new Set(["any_file_exists", "cloudflare_blueprint", "command_succeeds", "env_file_key", "file_contains", "file_exists", "home_file_exists", "mcp_server", "postmark_blueprint"]);
+const PROBE_TYPES = new Set(["any_file_exists", "cloudflare_blueprint", "command_succeeds", "env_file_key", "file_contains", "file_exists", "home_file_exists", "mcp_server", "postmark_blueprint", "sentry_blueprint"]);
 const AUTH_FLOWS = new Set(["cli_browser_login", "remote_oauth"]);
 const VERIFICATION_POLICIES = new Set(["machine", "probe_and_attestation"]);
-const CAPABILITIES = new Set(["analytics", "backend", "billing", "deployment", "email", "repository", "tracking"]);
+const CAPABILITIES = new Set(["analytics", "backend", "billing", "deployment", "email", "observability", "repository", "tracking"]);
 const PRODUCTION_CHECK_TYPES = new Set(["equals", "matches"]);
 
 function readJson(path) {

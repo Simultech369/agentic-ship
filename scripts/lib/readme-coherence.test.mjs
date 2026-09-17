@@ -11,6 +11,7 @@ const providers = {
   stripe: { capability: "billing", displayName: "Stripe" },
   resend: { capability: "email", displayName: "Resend" },
   postmark: { capability: "email", displayName: "Postmark" },
+  sentry: { capability: "observability", displayName: "Sentry" },
 };
 
 const supportedCommands = [
@@ -19,6 +20,7 @@ const supportedCommands = [
   "pnpm onboard postmark --host codex",
   "pnpm onboard netlify --host codex",
   "pnpm onboard cloudflare --host codex",
+  "pnpm onboard sentry --host codex",
 ].join("\n");
 
 describe("README provider catalog sync", () => {

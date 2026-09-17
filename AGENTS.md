@@ -86,7 +86,7 @@ Windows. The buyer may be on any of the three.
 | `pnpm sync:mcp` · `pnpm check:mcp` | write / verify the `.cursor/mcp.json` mirror |
 | `pnpm sync:agents` · `pnpm check:agents` | write / verify native Claude plugin, Codex, Cursor, Hermes, and OpenClaw role adapters |
 | `pnpm check:commands` | every `pnpm` name in prose resolves to a real script, and `skills.lock.json` matches disk |
-| `pnpm check:readme` | verify that the README's supported deployment providers match the connection catalog |
+| `pnpm check:readme` | verify that the README's supported providers match the connection catalog |
 | `pnpm secret` | print one random base64 secret |
 
 `pnpm install` runs the link, MCP, and agent-adapter synchronizers through `postinstall`.
@@ -580,6 +580,25 @@ The product brief selects one email provider: Resend remains the default; Postma
 - Postmark production preflight verifies the live token, transactional stream,
   authenticated webhook, and sender by sending one message to Postmark's black-hole
   sink. The sink does not contact a person, but the message counts toward monthly volume.
+
+## Observability rules (optional Sentry)
+
+Details: `.agents/skills/convex-structure/references/observability-sentry.md`.
+
+- Observability is optional. With no selected provider or Sentry configuration, install,
+  build, and verification remain green.
+- The official `@sentry/nextjs` SDK owns browser, server, and edge reporting. All three
+  initializations use the shared `src/lib/observability.ts` scrubber through `beforeSend`.
+- `NEXT_PUBLIC_SENTRY_DSN` is public. `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`,
+  `SENTRY_PROJECT`, and `SENTRY_RELEASE` are build-only values and never use a
+  `NEXT_PUBLIC_` name.
+- Local development stays quiet unless `SENTRY_ENABLE_DEV=true` is explicit. Production
+  events declare environment and release, keep default PII collection off, and upload
+  source maps through `withSentryConfig` using the same release identifier.
+- Convex exceptions use Convex's dashboard-owned Sentry integration with a Node.js
+  project. Do not import the Sentry SDK into Convex functions.
+- A completed setup needs both machine proof of the runtime and source-map blueprint and
+  human confirmation of one non-personal synthetic event plus the Convex integration.
 
 ## Analytics rules (PostHog, wired)
 

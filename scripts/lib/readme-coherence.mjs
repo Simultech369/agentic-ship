@@ -7,7 +7,7 @@ export function inspectReadmeProviderCatalog({
   mcpServers,
 } = {}) {
   const issues = [];
-  const documentedCapabilities = new Set(["billing", "email", "deployment"]);
+  const documentedCapabilities = new Set(["billing", "email", "deployment", "observability"]);
   const unsupportedSection = readme.split("### Not wired yet, and what a swap costs")[1] ?? "";
 
   for (const [id, provider] of Object.entries(providers)) {

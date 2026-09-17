@@ -1077,6 +1077,52 @@
           "text": "Delete the /postmark/webhook endpoint under Postmark Server → Webhooks."
         }
       ]
+    },
+    "sentry": {
+      "displayName": "Sentry",
+      "capability": "observability",
+      "defaultForCapability": true,
+      "docsUrl": "https://docs.sentry.io/",
+      "actionTtlMinutes": 1440,
+      "maxVerificationAttempts": 5,
+      "projectProvisioning": {
+        "setupUrl": "https://sentry.io/settings/projects/",
+        "instructions": [
+          "Create or select a JavaScript project for the Next.js application and copy its public Client Key (DSN).",
+          "Install the official Next.js SDK and implement the browser, server, and edge initialization files against the shared scrubSentryEvent seam. Keep local development disabled unless SENTRY_ENABLE_DEV is explicitly true.",
+          "Store SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT, and SENTRY_RELEASE in the deployment or CI build environment. The token needs org:ci for release and source-map upload and must never enter a NEXT_PUBLIC variable.",
+          "For Convex exceptions, enable Sentry from the production deployment's Dashboard → Settings → Integrations with a Node.js Sentry project. Convex owns that integration; do not add an SDK to Convex functions.",
+          "Send a synthetic SDK exception with no personal data, confirm its release and environment in Sentry, and attest that the Convex dashboard integration is active."
+        ],
+        "verification": {
+          "policy": "probe_and_attestation",
+          "probes": [
+            {
+              "id": "sentry-blueprint",
+              "label": "Sentry runtime, privacy, release, and source-map blueprint is complete",
+              "type": "sentry_blueprint",
+              "required": true
+            }
+          ]
+        },
+        "automation": {
+          "run": [
+            {
+              "command": "pnpm open:url https://sentry.io/settings/projects/",
+              "opensBrowser": true,
+              "why": "Open Sentry project settings to copy the public Client Keys (DSN) — safe for client-side error reporting."
+            }
+          ]
+        }
+      },
+      "revocation": [
+        {
+          "text": "Revoke or rotate SENTRY_AUTH_TOKEN in Sentry under Settings → Developer Settings → Auth Tokens."
+        },
+        {
+          "text": "Disable or remove the project DSN in Sentry under Project Settings → Client Keys (DSN) to halt error ingestion."
+        }
+      ]
     }
   }
 }

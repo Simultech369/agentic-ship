@@ -123,3 +123,15 @@ test("postmark can be selected as alternative email provider", () => {
     tracking: "linear",
   });
 });
+
+test("Sentry observability is optional and selectable", () => {
+  expect(resolveProviderSelection({ observability: "sentry" })).toEqual({
+    billing: "stripe",
+    email: "resend",
+    analytics: "posthog",
+    deployment: "netlify",
+    tracking: "linear",
+    observability: "sentry",
+  });
+  expect(resolveProviderSelection({ observability: null }).observability).toBe(null);
+});

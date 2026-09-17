@@ -22,6 +22,7 @@ way to revoke it.
 | Netlify | Deploy | `netlify login` browser flow |
 | Vercel | Deploy (alternative) | `vercel login` device flow via `pnpm provider:login vercel` |
 | Cloudflare | Deploy (alternative) | Keyring-backed Wrangler OAuth via `pnpm provider:login cloudflare` |
+| Sentry | Observability (optional) | Public DSN plus deployment-owned release and source-map settings |
 
 The catalog behind this table is
 [.agents/connections/providers.json](../.agents/connections/providers.json): probes,
