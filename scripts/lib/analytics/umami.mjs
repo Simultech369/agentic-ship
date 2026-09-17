@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto";
-import { scrubObject, scrubString, scrubUrl } from "./privacy.mjs";
+import { keepAllowedProperties, scrubObject, scrubString, scrubUrl } from "./privacy.mjs";
 
 export const UMAMI_WEBSITE_ID_ENV = "NEXT_PUBLIC_UMAMI_WEBSITE_ID";
 export const UMAMI_HOST_URL_ENV = "NEXT_PUBLIC_UMAMI_HOST_URL";
@@ -31,7 +30,7 @@ export function isValidUmamiHostUrl(hostUrl) {
   if (!trimmed.startsWith("https://")) return false;
   try {
     const url = new URL(trimmed);
-    return url.protocol === "https:" && Boolean(url.hostname);
+    return url.protocol === "https:" && Boolean(url.hostname) && !url.username && !url.password && !url.search && !url.hash && url.pathname === "/";
   } catch {
     return false;
   }
@@ -59,9 +58,16 @@ export function parseUmamiDomains(domains) {
   return [];
 }
 
+export function isValidUmamiDomainPattern(domain) {
+  if (typeof domain !== "string" || !domain.trim()) return false;
+  const candidate = domain.trim().toLowerCase();
+  const hostname = candidate.startsWith("*.") ? candidate.slice(2) : candidate;
+  return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(hostname);
+}
+
 /**
  * Check if a hostname or origin is permitted by the allowed domains list.
- * If no allowed domains are configured, all origins are permitted.
+ * If no allowed domains are configured, every origin is denied.
  *
  * @param {string} originOrHostname
  * @param {string|string[]} [allowedDomains]
@@ -69,7 +75,7 @@ export function parseUmamiDomains(domains) {
  */
 export function isUmamiOriginAllowed(originOrHostname, allowedDomains) {
   const allowed = parseUmamiDomains(allowedDomains);
-  if (allowed.length === 0) return true;
+  if (allowed.length === 0) return false;
   if (!originOrHostname || typeof originOrHostname !== "string") return false;
 
   let hostname = originOrHostname.trim().toLowerCase();
@@ -83,7 +89,7 @@ export function isUmamiOriginAllowed(originOrHostname, allowedDomains) {
 
   return allowed.some((domain) => {
     if (domain === hostname) return true;
-    if (domain.startsWith("*.") && hostname.endsWith(domain.slice(2))) return true;
+    if (domain.startsWith("*.") && hostname.endsWith(`.${domain.slice(2)}`)) return true;
     return false;
   });
 }
@@ -96,8 +102,15 @@ export function isUmamiOriginAllowed(originOrHostname, allowedDomains) {
  * @returns {string|null}
  */
 export function getUmamiScriptUrl(hostUrl, customScriptUrl) {
-  if (customScriptUrl && typeof customScriptUrl === "string" && customScriptUrl.trim().startsWith("https://")) {
-    return customScriptUrl.trim();
+  if (customScriptUrl && typeof customScriptUrl === "string" && isValidUmamiHostUrl(hostUrl)) {
+    try {
+      const host = new URL(hostUrl);
+      const script = new URL(customScriptUrl.trim());
+      if (script.protocol === "https:" && !script.username && !script.password && script.origin === host.origin) return script.toString();
+    } catch {
+      return null;
+    }
+    return null;
   }
   if (isValidUmamiHostUrl(hostUrl)) {
     return `${hostUrl.trim().replace(/\/+$/, "")}/script.js`;
@@ -141,10 +154,10 @@ export function getPublicUmamiConfig({
   const validHostUrl = typeof hostUrl === "string" && isValidUmamiHostUrl(hostUrl)
     ? hostUrl.trim().replace(/\/+$/, "")
     : null;
-  const normalizedDomains = parseUmamiDomains(domains);
+  const normalizedDomains = parseUmamiDomains(domains).filter(isValidUmamiDomainPattern);
   const resolvedScriptUrl = validHostUrl ? getUmamiScriptUrl(validHostUrl, scriptUrl) : null;
 
-  const enabled = Boolean(validWebsiteId && validHostUrl);
+  const enabled = Boolean(validWebsiteId && validHostUrl && normalizedDomains.length > 0);
 
   return {
     enabled,
@@ -257,7 +270,7 @@ export function createSyntheticUmamiEvent({
  *
  * @param {object} event
  * @param {{ websiteId?: string, hostUrl?: string }} [options]
- * @returns {{ delivered: boolean, eventId: string, payload: object, scrubbedEvent: object }}
+ * @returns {{ delivered: false, acceptedByAdapter: true, payload: object, scrubbedEvent: object }}
  */
 export function simulateUmamiCapture(event, { websiteId, hostUrl = "https://cloud.umami.is" } = {}) {
   const targetWebsiteId = websiteId || event?.websiteId;
@@ -270,8 +283,6 @@ export function simulateUmamiCapture(event, { websiteId, hostUrl = "https://clou
   }
 
   const scrubbedEvent = scrubUmamiEvent({ ...event, websiteId: targetWebsiteId });
-  const eventId = randomUUID();
-
   let hostname = "localhost";
   try {
     hostname = new URL(scrubbedEvent.url).hostname;
@@ -291,8 +302,9 @@ export function simulateUmamiCapture(event, { websiteId, hostUrl = "https://clou
   };
 
   return {
-    delivered: true,
-    eventId,
+    delivered: false,
+    acceptedByAdapter: true,
+    reason: "dry_run",
     apiEndpoint: `${targetHostUrl.replace(/\/+$/, "")}/api/send`,
     payload,
     scrubbedEvent,
@@ -315,6 +327,10 @@ export function simulateUmamiCapture(event, { websiteId, hostUrl = "https://clou
  */
 export function createUmamiClient(options = {}) {
   const config = getPublicUmamiConfig(options);
+  const tracker = options.tracker ?? globalThis.umami?.track?.bind(globalThis.umami);
+  const currentOrigin = options.currentOrigin ?? globalThis.location?.origin;
+  const allowedEvents = new Set(options.allowedEvents ?? []);
+  const allowedProperties = options.allowedProperties ?? [];
 
   if (!config.enabled) {
     return {
@@ -327,7 +343,7 @@ export function createUmamiClient(options = {}) {
           delivered: false,
           reason: "unconfigured",
           eventName: scrubString(String(eventName || "unknown")),
-          data: filterUmamiData(data || {}),
+          data: filterUmamiData(keepAllowedProperties(data, allowedProperties)),
         };
       },
       trackPageview: (data) => {
@@ -336,61 +352,75 @@ export function createUmamiClient(options = {}) {
           delivered: false,
           reason: "unconfigured",
           eventName: "pageview",
-          data: filterUmamiData(data || {}),
+          data: {},
         };
       },
-      identify: (data) => {
-        return {
-          success: true,
-          delivered: false,
-          reason: "unconfigured",
-          data: filterUmamiData(data || {}),
-        };
-      },
+      identify: () => ({ success: true, delivered: false, reason: "identity_tracking_disabled" }),
     };
   }
 
   return {
     provider: "umami",
-    isInitialized: () => true,
+    isInitialized: () => typeof tracker === "function" && isUmamiOriginAllowed(currentOrigin, config.domains),
     getConfig: () => config,
     track: (eventName, data) => {
+      if (!allowedEvents.has(eventName)) {
+        return { success: true, dispatched: false, delivered: false, reason: "event_not_allowed" };
+      }
       const scrubbed = scrubUmamiEvent({
         name: eventName,
         websiteId: config.websiteId,
-        data,
+        data: keepAllowedProperties(data, allowedProperties),
       });
 
+      if (!isUmamiOriginAllowed(currentOrigin, config.domains)) {
+        return { success: true, dispatched: false, delivered: false, reason: "origin_not_allowed", eventName: scrubbed.name, data: scrubbed.data };
+      }
+      if (typeof tracker !== "function") {
+        return { success: true, dispatched: false, delivered: false, reason: "tracker_unavailable", eventName: scrubbed.name, data: scrubbed.data };
+      }
+      try {
+        tracker(scrubbed.name, scrubbed.data);
+      } catch {
+        return { success: true, dispatched: false, delivered: false, reason: "tracker_error", eventName: scrubbed.name, data: scrubbed.data };
+      }
       return {
         success: true,
-        delivered: true,
+        dispatched: true,
+        delivered: false,
         eventName: scrubbed.name,
         websiteId: config.websiteId,
         data: scrubbed.data,
       };
     },
-    trackPageview: (data) => {
+    trackPageview: (data = {}) => {
       const scrubbed = scrubUmamiEvent({
         name: "pageview",
         websiteId: config.websiteId,
-        data,
+        url: data.url || options.currentUrl,
+        data: {},
       });
 
+      if (!isUmamiOriginAllowed(currentOrigin, config.domains)) {
+        return { success: true, dispatched: false, delivered: false, reason: "origin_not_allowed", eventName: "pageview", data: scrubbed.data };
+      }
+      if (typeof tracker !== "function") {
+        return { success: true, dispatched: false, delivered: false, reason: "tracker_unavailable", eventName: "pageview", data: scrubbed.data };
+      }
+      try {
+        data.url || options.currentUrl ? tracker({ website: config.websiteId, url: scrubbed.url }) : tracker();
+      } catch {
+        return { success: true, dispatched: false, delivered: false, reason: "tracker_error", eventName: "pageview", data: scrubbed.data };
+      }
       return {
         success: true,
-        delivered: true,
+        dispatched: true,
+        delivered: false,
         eventName: "pageview",
         websiteId: config.websiteId,
         data: scrubbed.data,
       };
     },
-    identify: (data) => {
-      const scrubbedData = filterUmamiData(data || {});
-      return {
-        success: true,
-        delivered: true,
-        data: scrubbedData,
-      };
-    },
+    identify: () => ({ success: true, dispatched: false, delivered: false, reason: "identity_tracking_disabled" }),
   };
 }

@@ -3,7 +3,10 @@ import {
   getPublicPlausibleConfig,
   isValidPlausibleDomain,
   isValidPlausibleScriptUrl,
-  PLAUSIBLE_API_HOST_ENV,
+  isSafePlausibleUrl,
+  parsePlausibleAllowedOrigins,
+  PLAUSIBLE_ALLOWED_ORIGINS_ENV,
+  PLAUSIBLE_EVENT_ENDPOINT_ENV,
   PLAUSIBLE_DOMAIN_ENV,
   PLAUSIBLE_SCRIPT_URL_ENV,
 } from "./plausible.mjs";
@@ -12,6 +15,7 @@ import {
   createUmamiClient,
   getPublicUmamiConfig,
   isValidUmamiHostUrl,
+  isValidUmamiDomainPattern,
   isValidUmamiWebsiteId,
   UMAMI_DOMAINS_ENV,
   UMAMI_HOST_URL_ENV,
@@ -59,7 +63,8 @@ export function createAnalyticsClient(provider, options = {}) {
     return createPlausibleClient({
       domain: options.domain || process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN,
       scriptUrl: options.scriptUrl || process.env.NEXT_PUBLIC_PLAUSIBLE_SCRIPT_URL,
-      apiHost: options.apiHost || process.env.NEXT_PUBLIC_PLAUSIBLE_API_HOST,
+      eventEndpoint: options.eventEndpoint || process.env.NEXT_PUBLIC_PLAUSIBLE_EVENT_ENDPOINT,
+      allowedOrigins: options.allowedOrigins || process.env.NEXT_PUBLIC_PLAUSIBLE_ALLOWED_ORIGINS,
       ...options,
     });
   }
@@ -77,6 +82,7 @@ export function createAnalyticsClient(provider, options = {}) {
   if (normalizedProvider === "posthog") {
     const apiKey = options.apiKey || process.env.NEXT_PUBLIC_POSTHOG_KEY;
     const enabled = Boolean(apiKey && apiKey.startsWith("phc_"));
+    const tracker = options.tracker;
 
     if (!enabled) {
       return {
@@ -89,27 +95,24 @@ export function createAnalyticsClient(provider, options = {}) {
       };
     }
 
+    const dispatch = (eventName, properties) => {
+      const scrubbedEvent = scrubString(String(eventName || "custom_event"));
+      const scrubbedProperties = scrubObject(properties || {});
+      if (typeof tracker !== "function") return { success: true, dispatched: false, delivered: false, reason: "tracker_unavailable", eventName: scrubbedEvent, properties: scrubbedProperties };
+      try {
+        tracker(scrubbedEvent, scrubbedProperties);
+        return { success: true, dispatched: true, delivered: false, eventName: scrubbedEvent, properties: scrubbedProperties };
+      } catch {
+        return { success: true, dispatched: false, delivered: false, reason: "tracker_error", eventName: scrubbedEvent, properties: scrubbedProperties };
+      }
+    };
     return {
       provider: "posthog",
-      isInitialized: () => true,
+      isInitialized: () => typeof tracker === "function",
       getConfig: () => ({ enabled: true, provider: "posthog", apiKey }),
-      track: (eventName, properties) => ({
-        success: true,
-        delivered: true,
-        eventName: scrubString(String(eventName || "custom_event")),
-        properties: scrubObject(properties || {}),
-      }),
-      capture: (eventName, properties) => ({
-        success: true,
-        delivered: true,
-        eventName: scrubString(String(eventName || "custom_event")),
-        properties: scrubObject(properties || {}),
-      }),
-      identify: (distinctId) => ({
-        success: true,
-        delivered: true,
-        distinctId: scrubString(String(distinctId || "anonymous")),
-      }),
+      track: dispatch,
+      capture: dispatch,
+      identify: () => ({ success: true, dispatched: false, delivered: false, reason: "identity_tracking_disabled" }),
     };
   }
 
@@ -145,6 +148,20 @@ export function inspectProductionAnalyticsEnvironment(stdout, { selectedProvider
       provider: "posthog",
       providerDisplayName: "PostHog",
       detail: "NEXT_PUBLIC_POSTHOG_KEY contains a personal phx_ key. Use public phc_ project keys only in browser bundles.",
+    };
+  }
+
+  const configuredProviders = [
+    has(POSTHOG_PUBLIC_KEY_ENV) && "posthog",
+    (has(PLAUSIBLE_DOMAIN_ENV) || has(PLAUSIBLE_SCRIPT_URL_ENV)) && "plausible",
+    (has(UMAMI_WEBSITE_ID_ENV) || has(UMAMI_HOST_URL_ENV)) && "umami",
+  ].filter(Boolean);
+  if (configuredProviders.length > 1) {
+    return {
+      status: "FAIL",
+      provider: selectedProvider || "multiple",
+      providerDisplayName: "Analytics",
+      detail: `Multiple analytics providers are configured: ${configuredProviders.join(", ")}. Keep only the selected provider's public variables.`,
     };
   }
 
@@ -190,13 +207,27 @@ export function inspectProductionAnalyticsEnvironment(stdout, { selectedProvider
         detail: `Production Plausible domain "${domain}" is not a valid production domain.`,
       };
     }
-    if (has(PLAUSIBLE_SCRIPT_URL_ENV) && !isValidPlausibleScriptUrl(val(PLAUSIBLE_SCRIPT_URL_ENV))) {
+    if (!has(PLAUSIBLE_SCRIPT_URL_ENV)) {
+      return { status: "FAIL", provider: "plausible", providerDisplayName: "Plausible", detail: "Plausible requires the site-specific NEXT_PUBLIC_PLAUSIBLE_SCRIPT_URL shown by the current installation screen." };
+    }
+    if (!isValidPlausibleScriptUrl(val(PLAUSIBLE_SCRIPT_URL_ENV))) {
       return {
         status: "FAIL",
         provider: "plausible",
         providerDisplayName: "Plausible",
         detail: `NEXT_PUBLIC_PLAUSIBLE_SCRIPT_URL "${val(PLAUSIBLE_SCRIPT_URL_ENV)}" must be a valid HTTPS URL.`,
       };
+    }
+    if (!has(PLAUSIBLE_ALLOWED_ORIGINS_ENV)) {
+      return { status: "FAIL", provider: "plausible", providerDisplayName: "Plausible", detail: "Plausible requires NEXT_PUBLIC_PLAUSIBLE_ALLOWED_ORIGINS so custom and self-hosted URLs fail closed." };
+    }
+    const allowedOrigins = parsePlausibleAllowedOrigins(val(PLAUSIBLE_ALLOWED_ORIGINS_ENV));
+    if (allowedOrigins.length === 0 || !isSafePlausibleUrl(val(PLAUSIBLE_SCRIPT_URL_ENV), allowedOrigins)) {
+      return { status: "FAIL", provider: "plausible", providerDisplayName: "Plausible", detail: "Plausible script URL must use an explicitly allowlisted HTTPS origin." };
+    }
+    const eventEndpoint = has(PLAUSIBLE_EVENT_ENDPOINT_ENV) ? val(PLAUSIBLE_EVENT_ENDPOINT_ENV) : "https://plausible.io/api/event";
+    if (!isSafePlausibleUrl(eventEndpoint, allowedOrigins)) {
+      return { status: "FAIL", provider: "plausible", providerDisplayName: "Plausible", detail: "Plausible event endpoint must be same-origin or use an explicitly allowlisted HTTPS origin." };
     }
     return {
       status: "PASS",
@@ -241,6 +272,10 @@ export function inspectProductionAnalyticsEnvironment(stdout, { selectedProvider
         detail: `Production Umami Host URL "${hostUrl}" must be a valid HTTPS URL.`,
       };
     }
+    const domains = val(UMAMI_DOMAINS_ENV).split(",").map((domain) => domain.trim()).filter(Boolean);
+    if (domains.length === 0 || !domains.every(isValidUmamiDomainPattern)) {
+      return { status: "FAIL", provider: "umami", providerDisplayName: "Umami", detail: "Umami requires NEXT_PUBLIC_UMAMI_DOMAINS with valid explicit production hostnames." };
+    }
     return {
       status: "PASS",
       provider: "umami",
@@ -281,4 +316,27 @@ export function inspectProductionAnalyticsEnvironment(stdout, { selectedProvider
     providerDisplayName: provider,
     detail: `Unknown analytics provider "${provider}". Expected one of: ${ANALYTICS_PROVIDERS.join(", ")}.`,
   };
+}
+
+export function inspectAnalyticsBlueprint({ provider, analyticsSource = "", envSource = "" } = {}) {
+  if (!analyticsSource.trim() && !envSource.trim()) {
+    return { status: "SKIP", detail: "Analytics is optional and no implementation was detected." };
+  }
+  const requirements = provider === "plausible"
+    ? [
+        [analyticsSource.includes("plausible") && analyticsSource.includes("scrub"), "src/lib/analytics.ts must scrub and dispatch Plausible events"],
+        [envSource.includes(PLAUSIBLE_DOMAIN_ENV), `missing ${PLAUSIBLE_DOMAIN_ENV}`],
+        [envSource.includes(PLAUSIBLE_SCRIPT_URL_ENV), `missing ${PLAUSIBLE_SCRIPT_URL_ENV}`],
+        [envSource.includes(PLAUSIBLE_ALLOWED_ORIGINS_ENV), `missing ${PLAUSIBLE_ALLOWED_ORIGINS_ENV}`],
+      ]
+    : [
+        [analyticsSource.includes("umami") && analyticsSource.includes("scrub"), "src/lib/analytics.ts must scrub and dispatch Umami events"],
+        [envSource.includes(UMAMI_WEBSITE_ID_ENV), `missing ${UMAMI_WEBSITE_ID_ENV}`],
+        [envSource.includes(UMAMI_HOST_URL_ENV), `missing ${UMAMI_HOST_URL_ENV}`],
+        [envSource.includes(UMAMI_DOMAINS_ENV), `missing ${UMAMI_DOMAINS_ENV}`],
+      ];
+  const missing = requirements.filter(([passed]) => !passed).map(([, detail]) => detail);
+  return missing.length === 0
+    ? { status: "PASS", detail: `${provider} analytics seam and fail-closed public configuration detected` }
+    : { status: "FAIL", detail: missing.join("; ") };
 }

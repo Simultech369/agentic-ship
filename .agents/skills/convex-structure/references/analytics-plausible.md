@@ -1,94 +1,66 @@
-# Analytics — Plausible via Privacy-First Seam
+# Plausible analytics adapter
 
-Reference for the convex-structure and frontend-security skills. Plausible is a lightweight, cookie-free, open-source web analytics tool built for privacy compliance (GDPR, CCPA, PECR) without tracking individuals across sites or devices.
+Plausible is an optional alternative to PostHog. The product brief selects one
+analytics provider; selecting Plausible must not initialize PostHog or Umami.
 
-## The pieces
+## Downstream contract
 
-| Piece | Owner | Job |
+`src/lib/analytics.ts` is the only application seam that calls `plausible()`. It
+accepts named product events and a small allowlisted property object, runs the shared
+privacy scrubber, and returns without making the product wait for analytics.
+
+The browser loads the site-specific script shown under Plausible Site Settings →
+General → Site Installation. Current Plausible scripts are unique to a site and use
+`plausible.init()` for options such as a custom event endpoint. Do not use the retired
+generic `script.js` snippet.
+
+## Public configuration
+
+| Variable | Required | Purpose |
 | --- | --- | --- |
-| Plausible Cloud / Self-Hosted | Plausible (vendor) | Ingests anonymous aggregate pageviews and custom events without cookies or persistent identifiers |
-| `scripts/lib/analytics/plausible.mjs` | this repo | Plausible integration helpers: domain validation, script URL resolution, privacy data scrubbing, synthetic event generator, and preflight gates |
-| `src/lib/analytics.ts` | this repo | The application analytics seam — exports typed `capture`, `trackEvent`, and `trackPageview` functions with automatic PII and secret redaction |
+| `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` | yes | Exact production hostname registered in Plausible |
+| `NEXT_PUBLIC_PLAUSIBLE_SCRIPT_URL` | yes | Site-specific script URL from Plausible, or a same-origin proxy path |
+| `NEXT_PUBLIC_PLAUSIBLE_EVENT_ENDPOINT` | for a proxy or self-hosted instance | Event endpoint; use `/api/event` for a same-origin proxy |
+| `NEXT_PUBLIC_PLAUSIBLE_ALLOWED_ORIGINS` | yes | Comma-separated HTTPS origins allowed to serve the script or receive events |
 
-## Why Plausible
+Plausible Cloud normally allowlists `https://plausible.io`. A self-hosted deployment
+uses its exact HTTPS origin. Relative proxy paths are safe because they remain on the
+product origin; protocol-relative and arbitrary remote URLs are rejected.
 
-- **Cookie-Free & Zero Consent Banners**: Plausible does not use cookies, does not store local storage identifiers, and generates a daily rotating pseudonymous hash based on IP and User-Agent that cannot be linked back to individual visitors.
-- **Lightweight Script**: The standard tracking script is under 1 KB (~45 times smaller than Google Analytics), keeping client bundle sizes and Time to Interactive (TTI) optimal.
-- **Strict Privacy**: No personal data (emails, tokens, passwords, prompt content) is ever collected or stored.
+## Events and privacy
 
-## Configuration & Environment Variables
+Call `plausible("Event name", { props })` after scrubbing. Plausible accepts custom
+properties in the optional `props` object. The adapter receives explicit event-name
+and property-key allowlists; unlisted names do not dispatch and unlisted properties
+are removed before scrubbing. A sent custom event must also be configured
+as a goal in Plausible before it appears as a conversion.
 
-Plausible requires only the public site domain registered in your Plausible dashboard.
+Never allowlist email addresses, authentication subjects, prompts, transcripts, secrets,
+payment data, unrestricted user content, or full URL query strings. Analytics events
+use product-owned enums and low-cardinality properties. Plausible has no identity call
+in this seam.
 
-| Key | Shape | Purpose |
-| --- | --- | --- |
-| `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` | `example.com` or `app.my-site.com` | **Required**. The site domain matching your configured Plausible dashboard site |
-| `NEXT_PUBLIC_PLAUSIBLE_SCRIPT_URL` | `https://plausible.io/js/script.js` | Optional custom script URL (for custom domain proxies, self-hosted Plausible, or extension scripts like `script.tagged-events.outbound-links.js`) |
-| `NEXT_PUBLIC_PLAUSIBLE_API_HOST` | `https://plausible.io` | Optional custom ingestion API endpoint for self-hosted instances |
+## Verification
 
-Configure in `.env.local` for development and in your hosting environment (Netlify / Vercel / Convex) for production:
+The local dry run prepares and scrubs a payload only. It returns
+`acceptedByAdapter: true` and `delivered: false`; it is not provider evidence.
 
-```bash
-NEXT_PUBLIC_PLAUSIBLE_DOMAIN=my-app.com
-```
+For a real check:
 
-## CSP & Custom Proxying
+1. Load the product with Plausible selected and confirm the site-specific script.
+2. Send one synthetic custom event through the browser tracker.
+3. Confirm the event in the Plausible dashboard and remove or exclude it from product reporting.
+4. Confirm the product's consent behavior matches its published privacy policy. A
+   cookie-free tracker does not by itself decide the product's legal consent duty.
+5. Run `pnpm preflight --prod` with the production public variables available.
 
-When using Plausible Cloud:
-- Add `https://plausible.io` to `script-src` and `connect-src` in `next.config.ts`, OR
-- Proxy Plausible through Next.js rewrites on your own origin (`/stats/js/script.js` → `https://plausible.io/js/script.js`, `/api/event` → `https://plausible.io/api/event`) so `connect-src 'self'` and `script-src 'self'` remain untouched.
+Network or tracker failure must never interrupt the product workflow.
 
-## Privacy Filters & Data Scrubbing
+## Removal
 
-All events routed to Plausible pass through privacy filters before dispatch:
-- **Email Redaction**: Emails in properties are replaced with `[REDACTED_EMAIL]`.
-- **Token & Key Isolation**: Bearer tokens, JWTs, Stripe keys, Sentry tokens, PostHog personal keys, and Resend keys are stripped and replaced with `[REDACTED_TOKEN]` or `[REDACTED]`.
-- **Agent Prompts & Transcripts**: Prompt parameters, transcript logs, system instructions, and healing ledgers are filtered out.
-- **URL Query Cleansing**: URL query string secrets (`token`, `auth`, `key`, `secret`, `password`) are scrubbed before pageview tracking.
+Delete the site in Plausible, remove all four Plausible public variables from the
+deployment, select another analytics provider or none, and run `pnpm verify`.
 
-## Synthetic Event Verification
-
-To verify that Plausible tracking and data scrubbing work without polluting production metrics:
-
-```javascript
-import { createSyntheticPlausibleEvent, simulatePlausibleCapture } from "./scripts/lib/analytics/plausible.mjs";
-
-const syntheticEvent = createSyntheticPlausibleEvent({
-  eventName: "signup_completed",
-  domain: "my-app.com",
-  props: { plan: "pro" },
-});
-
-const { delivered, eventId, payload, scrubbedEvent } = simulatePlausibleCapture(syntheticEvent, {
-  domain: "my-app.com",
-});
-```
-
-Synthetic events are tagged with `synthetic: "true"` and `verification: "true"` so they can be filtered out of dashboard reporting.
-
-## Non-Blocking Unconfigured Behavior
-
-Analytics is optional. If `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` is not set:
-- `createPlausibleClient()` returns a safe, no-op client.
-- `isInitialized()` returns `false`.
-- Calls to `trackEvent()` and `trackPageview()` return non-blocking success payloads (`{ success: true, delivered: false, reason: "unconfigured" }`) without throwing errors.
-
-## Preflight Validation
-
-Run preflight checks to audit Plausible configuration before going live:
-
-```bash
-pnpm preflight
-pnpm preflight --prod
-```
-
-Preflight verifies that:
-- `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` is configured and is not `localhost` or an empty placeholder.
-- If `NEXT_PUBLIC_PLAUSIBLE_SCRIPT_URL` is configured, it uses HTTPS.
-
-## Teardown & Removal
-
-To remove Plausible:
-1. Remove `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` from `.env.local` and your deployment environment.
-2. Delete the site entry in the Plausible dashboard under **Site Settings → Delete Site**.
-3. Run `pnpm verify` to confirm clean builds and passing tests.
+Official references: [installation and script update](https://plausible.io/docs/script-update-guide),
+[custom events](https://plausible.io/docs/custom-event-goals), and
+[proxy configuration](https://plausible.io/docs/proxy/introduction).

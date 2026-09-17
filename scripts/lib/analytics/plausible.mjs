@@ -1,9 +1,9 @@
-import { randomUUID } from "node:crypto";
-import { scrubObject, scrubString, scrubUrl } from "./privacy.mjs";
+import { keepAllowedProperties, scrubObject, scrubString, scrubUrl } from "./privacy.mjs";
 
 export const PLAUSIBLE_DOMAIN_ENV = "NEXT_PUBLIC_PLAUSIBLE_DOMAIN";
 export const PLAUSIBLE_SCRIPT_URL_ENV = "NEXT_PUBLIC_PLAUSIBLE_SCRIPT_URL";
-export const PLAUSIBLE_API_HOST_ENV = "NEXT_PUBLIC_PLAUSIBLE_API_HOST";
+export const PLAUSIBLE_EVENT_ENDPOINT_ENV = "NEXT_PUBLIC_PLAUSIBLE_EVENT_ENDPOINT";
+export const PLAUSIBLE_ALLOWED_ORIGINS_ENV = "NEXT_PUBLIC_PLAUSIBLE_ALLOWED_ORIGINS";
 
 const DOMAIN_REGEX = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
 
@@ -38,7 +38,31 @@ export function isValidPlausibleScriptUrl(scriptUrl) {
   if (!trimmed.startsWith("https://")) return false;
   try {
     const url = new URL(trimmed);
-    return url.protocol === "https:" && url.pathname.length > 1;
+    return url.protocol === "https:" && !url.username && !url.password && url.pathname.length > 1 && !(url.origin === "https://plausible.io" && url.pathname === "/js/script.js");
+  } catch {
+    return false;
+  }
+}
+
+export function parsePlausibleAllowedOrigins(origins) {
+  const candidates = Array.isArray(origins) ? origins : typeof origins === "string" ? origins.split(",") : [];
+  return candidates.map((value) => String(value).trim()).filter((value) => {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" && !url.username && !url.password && url.origin === value.replace(/\/$/, "");
+    } catch {
+      return false;
+    }
+  }).map((value) => value.replace(/\/$/, ""));
+}
+
+export function isSafePlausibleUrl(value, allowedOrigins = ["https://plausible.io"]) {
+  if (typeof value !== "string" || !value.trim()) return false;
+  const candidate = value.trim();
+  if (candidate.startsWith("/") && !candidate.startsWith("//")) return true;
+  try {
+    const url = new URL(candidate);
+    return url.protocol === "https:" && allowedOrigins.includes(url.origin);
   } catch {
     return false;
   }
@@ -47,12 +71,12 @@ export function isValidPlausibleScriptUrl(scriptUrl) {
 /**
  * Validate Plausible API host URL (must be HTTPS URL).
  *
- * @param {string} apiHost
+ * @param {string} eventEndpoint
  * @returns {boolean}
  */
-export function isValidPlausibleApiHost(apiHost) {
-  if (typeof apiHost !== "string" || !apiHost.trim()) return false;
-  const trimmed = apiHost.trim();
+export function isValidPlausibleEventEndpoint(eventEndpoint) {
+  if (typeof eventEndpoint !== "string" || !eventEndpoint.trim()) return false;
+  const trimmed = eventEndpoint.trim();
   if (!trimmed.startsWith("https://")) return false;
   try {
     const url = new URL(trimmed);
@@ -68,7 +92,7 @@ export function isValidPlausibleApiHost(apiHost) {
  * @param {{
  *   domain?: string,
  *   scriptUrl?: string,
- *   apiHost?: string,
+ *   eventEndpoint?: string,
  *   outboundLinks?: boolean,
  *   taggedEvents?: boolean,
  *   hashMode?: boolean
@@ -78,7 +102,7 @@ export function isValidPlausibleApiHost(apiHost) {
  *   provider: "plausible",
  *   domain: string|null,
  *   scriptUrl: string,
- *   apiHost: string,
+ *   eventEndpoint: string|null,
  *   outboundLinks: boolean,
  *   taggedEvents: boolean,
  *   hashMode: boolean
@@ -86,26 +110,29 @@ export function isValidPlausibleApiHost(apiHost) {
  */
 export function getPublicPlausibleConfig({
   domain,
-  scriptUrl = "https://plausible.io/js/script.js",
-  apiHost = "https://plausible.io",
+  scriptUrl,
+  eventEndpoint = "https://plausible.io/api/event",
+  allowedOrigins = ["https://plausible.io"],
   outboundLinks = false,
   taggedEvents = false,
   hashMode = false,
 } = {}) {
   const validDomain = typeof domain === "string" && isValidPlausibleDomain(domain) ? domain.trim() : null;
-  const validScriptUrl = typeof scriptUrl === "string" && isValidPlausibleScriptUrl(scriptUrl)
+  const normalizedOrigins = parsePlausibleAllowedOrigins(allowedOrigins);
+  const validScriptUrl = typeof scriptUrl === "string" && isSafePlausibleUrl(scriptUrl, normalizedOrigins)
     ? scriptUrl.trim()
-    : "https://plausible.io/js/script.js";
-  const validApiHost = typeof apiHost === "string" && isValidPlausibleApiHost(apiHost)
-    ? apiHost.trim().replace(/\/+$/, "")
-    : "https://plausible.io";
+    : null;
+  const validEventEndpoint = typeof eventEndpoint === "string" && isSafePlausibleUrl(eventEndpoint, normalizedOrigins)
+    ? eventEndpoint.trim()
+    : null;
 
   return {
-    enabled: Boolean(validDomain),
+    enabled: Boolean(validDomain && validScriptUrl && validEventEndpoint),
     provider: "plausible",
     domain: validDomain,
     scriptUrl: validScriptUrl,
-    apiHost: validApiHost,
+    eventEndpoint: validEventEndpoint,
+    allowedOrigins: normalizedOrigins,
     outboundLinks: Boolean(outboundLinks),
     taggedEvents: Boolean(taggedEvents),
     hashMode: Boolean(hashMode),
@@ -205,18 +232,16 @@ export function createSyntheticPlausibleEvent({
  * Simulate Plausible capture without network side-effects.
  *
  * @param {object} event
- * @param {{ domain?: string, apiHost?: string }} [options]
- * @returns {{ delivered: boolean, eventId: string, payload: object, scrubbedEvent: object }}
+ * @param {{ domain?: string, eventEndpoint?: string }} [options]
+ * @returns {{ delivered: false, acceptedByAdapter: true, payload: object, scrubbedEvent: object }}
  */
-export function simulatePlausibleCapture(event, { domain, apiHost = "https://plausible.io" } = {}) {
+export function simulatePlausibleCapture(event, { domain, eventEndpoint = "https://plausible.io/api/event" } = {}) {
   const targetDomain = domain || event?.domain || "example.com";
   if (!isValidPlausibleDomain(targetDomain)) {
     throw new Error(`Cannot capture Plausible event: Invalid domain "${targetDomain}".`);
   }
 
   const scrubbedEvent = scrubPlausibleEvent({ ...event, domain: targetDomain });
-  const eventId = randomUUID();
-
   const payload = {
     name: scrubbedEvent.name,
     url: scrubbedEvent.url,
@@ -225,9 +250,10 @@ export function simulatePlausibleCapture(event, { domain, apiHost = "https://pla
   };
 
   return {
-    delivered: true,
-    eventId,
-    apiEndpoint: `${apiHost.replace(/\/+$/, "")}/api/event`,
+    delivered: false,
+    acceptedByAdapter: true,
+    reason: "dry_run",
+    apiEndpoint: eventEndpoint,
     payload,
     scrubbedEvent,
   };
@@ -240,7 +266,7 @@ export function simulatePlausibleCapture(event, { domain, apiHost = "https://pla
  * @param {{
  *   domain?: string,
  *   scriptUrl?: string,
- *   apiHost?: string,
+ *   eventEndpoint?: string,
  *   outboundLinks?: boolean,
  *   taggedEvents?: boolean,
  *   hashMode?: boolean
@@ -249,6 +275,9 @@ export function simulatePlausibleCapture(event, { domain, apiHost = "https://pla
  */
 export function createPlausibleClient(options = {}) {
   const config = getPublicPlausibleConfig(options);
+  const tracker = options.tracker ?? globalThis.plausible;
+  const allowedEvents = new Set(options.allowedEvents ?? []);
+  const allowedProperties = options.allowedProperties ?? [];
 
   if (!config.enabled) {
     return {
@@ -261,7 +290,7 @@ export function createPlausibleClient(options = {}) {
           delivered: false,
           reason: "unconfigured",
           eventName: scrubString(String(eventName || "unknown")),
-          props: filterPlausibleProps(props || {}),
+          props: filterPlausibleProps(keepAllowedProperties(props, allowedProperties)),
         };
       },
       trackPageview: ({ url, props } = {}) => {
@@ -271,7 +300,7 @@ export function createPlausibleClient(options = {}) {
           reason: "unconfigured",
           eventName: "pageview",
           url: scrubUrl(url || ""),
-          props: filterPlausibleProps(props || {}),
+          props: filterPlausibleProps(keepAllowedProperties(props, allowedProperties)),
         };
       },
     };
@@ -279,19 +308,31 @@ export function createPlausibleClient(options = {}) {
 
   return {
     provider: "plausible",
-    isInitialized: () => true,
+    isInitialized: () => typeof tracker === "function",
     getConfig: () => config,
     trackEvent: (eventName, { props, url } = {}) => {
+      if (!allowedEvents.has(eventName)) {
+        return { success: true, dispatched: false, delivered: false, reason: "event_not_allowed" };
+      }
       const scrubbed = scrubPlausibleEvent({
         name: eventName,
         url: url || `https://${config.domain}/`,
         domain: config.domain,
-        props,
+        props: keepAllowedProperties(props, allowedProperties),
       });
 
+      if (typeof tracker !== "function") {
+        return { success: true, dispatched: false, delivered: false, reason: "tracker_unavailable", eventName: scrubbed.name, props: scrubbed.props };
+      }
+      try {
+        tracker(scrubbed.name, { props: scrubbed.props, url: scrubbed.url });
+      } catch {
+        return { success: true, dispatched: false, delivered: false, reason: "tracker_error", eventName: scrubbed.name, props: scrubbed.props };
+      }
       return {
         success: true,
-        delivered: true,
+        dispatched: true,
+        delivered: false,
         eventName: scrubbed.name,
         domain: config.domain,
         url: scrubbed.url,
@@ -304,12 +345,21 @@ export function createPlausibleClient(options = {}) {
         name: "pageview",
         url: targetUrl,
         domain: config.domain,
-        props,
+        props: keepAllowedProperties(props, allowedProperties),
       });
 
+      if (typeof tracker !== "function") {
+        return { success: true, dispatched: false, delivered: false, reason: "tracker_unavailable", eventName: "pageview", url: scrubbed.url, props: scrubbed.props };
+      }
+      try {
+        tracker("pageview", { props: scrubbed.props, url: scrubbed.url });
+      } catch {
+        return { success: true, dispatched: false, delivered: false, reason: "tracker_error", eventName: "pageview", url: scrubbed.url, props: scrubbed.props };
+      }
       return {
         success: true,
-        delivered: true,
+        dispatched: true,
+        delivered: false,
         eventName: "pageview",
         domain: config.domain,
         url: scrubbed.url,

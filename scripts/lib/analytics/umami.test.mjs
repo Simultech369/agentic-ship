@@ -8,6 +8,7 @@ import {
   getUmamiScriptUrl,
   isUmamiOriginAllowed,
   isValidUmamiHostUrl,
+  isValidUmamiDomainPattern,
   isValidUmamiWebsiteId,
   parseUmamiDomains,
   scrubUmamiEvent,
@@ -34,7 +35,8 @@ describe("Umami Website ID and Host URL validation", () => {
   test("validates Host URL must be HTTPS", () => {
     expect(isValidUmamiHostUrl("https://cloud.umami.is")).toBe(true);
     expect(isValidUmamiHostUrl("https://analytics.example.com")).toBe(true);
-    expect(isValidUmamiHostUrl("https://eu.umami.is/custom-path")).toBe(true);
+    expect(isValidUmamiHostUrl("https://eu.umami.is/custom-path")).toBe(false);
+    expect(isValidUmamiHostUrl("https://user:pass@cloud.umami.is")).toBe(false);
     expect(isValidUmamiHostUrl("http://insecure.com")).toBe(false);
     expect(isValidUmamiHostUrl("not-a-url")).toBe(false);
     expect(isValidUmamiHostUrl("")).toBe(false);
@@ -49,6 +51,13 @@ describe("Umami allowed origins and script URLs", () => {
     expect(parseUmamiDomains(null)).toEqual([]);
   });
 
+  test("accepts only hostname and wildcard-hostname allowlist entries", () => {
+    expect(isValidUmamiDomainPattern("example.com")).toBe(true);
+    expect(isValidUmamiDomainPattern("*.example.com")).toBe(true);
+    expect(isValidUmamiDomainPattern("https://example.com")).toBe(false);
+    expect(isValidUmamiDomainPattern("localhost")).toBe(false);
+  });
+
   test("validates allowed origins against configured domains", () => {
     const domains = "my-saas.com, *.my-saas.com, partner.org";
     expect(isUmamiOriginAllowed("my-saas.com", domains)).toBe(true);
@@ -57,13 +66,14 @@ describe("Umami allowed origins and script URLs", () => {
     expect(isUmamiOriginAllowed("unauthorized.com", domains)).toBe(false);
     expect(isUmamiOriginAllowed("other-site.org", domains)).toBe(false);
 
-    // If no domains are configured, all origins are allowed
-    expect(isUmamiOriginAllowed("any-site.com", "")).toBe(true);
+    expect(isUmamiOriginAllowed("any-site.com", "")).toBe(false);
+    expect(isUmamiOriginAllowed("badmy-saas.com", "*.my-saas.com")).toBe(false);
   });
 
   test("derives standard and custom script URLs", () => {
     expect(getUmamiScriptUrl("https://cloud.umami.is")).toBe("https://cloud.umami.is/script.js");
-    expect(getUmamiScriptUrl("https://cloud.umami.is/", "https://custom.cdn.com/umami.js")).toBe("https://custom.cdn.com/umami.js");
+    expect(getUmamiScriptUrl("https://cloud.umami.is/", "https://cloud.umami.is/custom.js")).toBe("https://cloud.umami.is/custom.js");
+    expect(getUmamiScriptUrl("https://cloud.umami.is/", "https://custom.cdn.com/umami.js")).toBeNull();
     expect(getUmamiScriptUrl("http://invalid.com")).toBeNull();
   });
 });
@@ -92,6 +102,16 @@ describe("Umami public configuration", () => {
     expect(config.domains).toEqual(["example.com", "app.example.com"]);
     expect(config.autoTrack).toBe(true);
     expect(config.doNotTrack).toBe(false);
+  });
+
+  test("supports an explicitly configured self-hosted instance", () => {
+    const config = getPublicUmamiConfig({
+      websiteId: "9420c944-2450-48e0-bb15-84e0c460a80e",
+      hostUrl: "https://stats.example.com",
+      domains: "app.example.com",
+    });
+    expect(config.enabled).toBe(true);
+    expect(config.scriptUrl).toBe("https://stats.example.com/script.js");
   });
 });
 
@@ -157,7 +177,7 @@ describe("Umami privacy filtering and data scrubbing", () => {
     const scrubbed = scrubUmamiEvent(event);
     expect(scrubbed.name).toBe("pricing_click");
     expect(scrubbed.url).not.toContain("secret123");
-    expect(scrubbed.url).toContain("plan=enterprise");
+    expect(scrubbed.url).not.toContain("plan=enterprise");
     expect(scrubbed.data.plan).toBe("enterprise");
   });
 });
@@ -194,8 +214,9 @@ describe("Umami synthetic event testing", () => {
       hostUrl: "https://analytics.company.com",
     });
 
-    expect(result.delivered).toBe(true);
-    expect(result.eventId).toBeDefined();
+    expect(result.delivered).toBe(false);
+    expect(result.acceptedByAdapter).toBe(true);
+    expect(result.reason).toBe("dry_run");
     expect(result.apiEndpoint).toBe("https://analytics.company.com/api/send");
     expect(result.payload.type).toBe("event");
     expect(result.payload.payload.website).toBe("9420c944-2450-48e0-bb15-84e0c460a80e");
@@ -237,13 +258,19 @@ describe("Umami client non-blocking behavior", () => {
     const identifyResult = client.identify({ role: "admin" });
     expect(identifyResult.success).toBe(true);
     expect(identifyResult.delivered).toBe(false);
-    expect(identifyResult.reason).toBe("unconfigured");
+    expect(identifyResult.reason).toBe("identity_tracking_disabled");
   });
 
   test("tracks events and pageviews when properly configured", () => {
+    const calls = [];
     const client = createUmamiClient({
       websiteId: "9420c944-2450-48e0-bb15-84e0c460a80e",
       hostUrl: "https://cloud.umami.is",
+      domains: "app.example.com",
+      currentOrigin: "https://app.example.com",
+      tracker: (...args) => calls.push(args),
+      allowedEvents: ["cta_click"],
+      allowedProperties: ["button"],
     });
 
     expect(client.isInitialized()).toBe(true);
@@ -251,14 +278,32 @@ describe("Umami client non-blocking behavior", () => {
 
     const trackResult = client.track("cta_click", { button: "try_free" });
     expect(trackResult.success).toBe(true);
-    expect(trackResult.delivered).toBe(true);
+    expect(trackResult.dispatched).toBe(true);
+    expect(trackResult.delivered).toBe(false);
     expect(trackResult.eventName).toBe("cta_click");
     expect(trackResult.websiteId).toBe("9420c944-2450-48e0-bb15-84e0c460a80e");
     expect(trackResult.data.button).toBe("try_free");
 
     const pageviewResult = client.trackPageview();
     expect(pageviewResult.success).toBe(true);
-    expect(pageviewResult.delivered).toBe(true);
+    expect(pageviewResult.dispatched).toBe(true);
+    expect(pageviewResult.delivered).toBe(false);
     expect(pageviewResult.eventName).toBe("pageview");
+    expect(calls).toHaveLength(2);
+    expect(client.identify({ role: "admin" })).toMatchObject({ dispatched: false, delivered: false, reason: "identity_tracking_disabled" });
+    expect(client.track("customer_supplied_name", { userContent: "private" })).toMatchObject({ dispatched: false, reason: "event_not_allowed" });
+  });
+
+  test("blocked origins and tracker failures never interrupt the product", () => {
+    const base = {
+      websiteId: "9420c944-2450-48e0-bb15-84e0c460a80e",
+      hostUrl: "https://cloud.umami.is",
+      domains: "app.example.com",
+      allowedEvents: ["signup"],
+    };
+    expect(createUmamiClient({ ...base, currentOrigin: "https://evil.example", tracker: () => {} }).track("signup"))
+      .toMatchObject({ success: true, dispatched: false, reason: "origin_not_allowed" });
+    expect(createUmamiClient({ ...base, currentOrigin: "https://app.example.com", tracker: () => { throw new Error("blocked"); } }).track("signup"))
+      .toMatchObject({ success: true, dispatched: false, reason: "tracker_error" });
   });
 });

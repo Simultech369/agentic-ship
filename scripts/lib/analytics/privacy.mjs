@@ -17,6 +17,7 @@ export const SENSITIVE_KEY_PATTERNS = [
   /^(?:creditCard|credit_card|cardNumber|card_number|cvv|cvc|ssn|socialSecurityNumber|social_security_number|pan|pin|email|userEmail|user_email|user_name|username)$/i,
   // Agent Prompts, Transcripts, Contexts
   /^(?:prompt|prompts|rawPrompt|raw_prompt|systemPrompt|system_prompt|userPrompt|user_prompt|userInput|user_input|transcript|transcripts|conversation|messages|instructions|instruction|agentState|agent_state|healLedger|heal_ledger)$/i,
+  /^(?:userContent|user_content|rawContent|raw_content|freeText|free_text|feedback|comment)$/i,
 ];
 
 export const STRING_REDACTION_RULES = [
@@ -68,6 +69,12 @@ export function isSensitiveKey(key) {
   return SENSITIVE_KEY_PATTERNS.some((pattern) => pattern.test(key));
 }
 
+export function keepAllowedProperties(value, allowedKeys = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const allowed = new Set(Array.isArray(allowedKeys) ? allowedKeys : []);
+  return Object.fromEntries(Object.entries(value).filter(([key]) => allowed.has(key)));
+}
+
 /**
  * Clean a URL by stripping sensitive query parameters.
  *
@@ -83,13 +90,12 @@ export function scrubUrl(urlString) {
       "code", "sig", "signature", "email", "user", "access_token", "refresh_token",
       "session_id", "session_token", "prompt",
     ];
-    let mutated = false;
     for (const param of sensitiveParams) {
       if (parsed.searchParams.has(param)) {
         parsed.searchParams.set(param, "[REDACTED]");
-        mutated = true;
       }
     }
+    parsed.search = "";
     if (urlString.startsWith("http://") || urlString.startsWith("https://")) {
       return parsed.toString();
     }

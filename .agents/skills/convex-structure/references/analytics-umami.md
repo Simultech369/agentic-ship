@@ -1,98 +1,67 @@
-# Analytics — Umami via Privacy-First Seam
+# Umami analytics adapter
 
-Reference for the convex-structure and frontend-security skills. Umami is an open-source, privacy-focused alternative to Google Analytics that provides full data ownership, cookieless tracking, and multi-domain analytics with zero PII collection.
+Umami is an optional alternative to PostHog. The product brief selects one analytics
+provider; selecting Umami must not initialize PostHog or Plausible.
 
-## The pieces
+## Downstream contract
 
-| Piece | Owner | Job |
+`src/lib/analytics.ts` is the only application seam that calls `umami.track()`. It
+accepts named product events and a small allowlisted data object, runs the shared
+privacy scrubber, and returns without making the product wait for analytics. The
+adapter receives explicit event-name and property-key allowlists; unlisted event names
+do not dispatch and unlisted properties are removed before scrubbing.
+
+The browser tracker supports `umami.track()` for a pageview,
+`umami.track(eventName)` for a custom event, and
+`umami.track(eventName, data)` for event data. This seam deliberately does not expose
+`umami.identify()`.
+
+## Public configuration
+
+| Variable | Required | Purpose |
 | --- | --- | --- |
-| Umami Cloud / Self-Hosted | Umami (vendor / self-hosted) | Collects privacy-preserving website traffic metrics, pageviews, and custom event data |
-| `scripts/lib/analytics/umami.mjs` | this repo | Umami integration helpers: website ID validation, host URL verification, origin allowlisting, data scrubber, synthetic event testing, and preflight gates |
-| `src/lib/analytics.ts` | this repo | The application analytics seam — exports typed `track`, `trackPageview`, and `identify` methods with automatic scrubbing |
+| `NEXT_PUBLIC_UMAMI_WEBSITE_ID` | yes | Website UUID from the Umami dashboard |
+| `NEXT_PUBLIC_UMAMI_HOST_URL` | yes | Exact HTTPS origin for Umami Cloud or the self-hosted instance |
+| `NEXT_PUBLIC_UMAMI_DOMAINS` | yes | Comma-separated product hostnames allowed to send events |
+| `NEXT_PUBLIC_UMAMI_SCRIPT_URL` | only when it differs from `<host>/script.js` | Exact HTTPS tracker script URL |
 
-## Why Umami
+An empty domain list denies tracking. `*.example.com` matches a real subdomain such as
+`app.example.com`; it does not match `example.com` or `badexample.com`. List the apex
+hostname separately when it is allowed.
 
-- **Cookieless & Privacy-First**: Umami does not track users across the web, does not use cookies, and collects no personally identifiable information (PII). All metric collection is compliant with GDPR, CCPA, and PECR.
-- **Data Ownership**: Available via Umami Cloud or full self-hosting on your own infrastructure (PostgreSQL / MySQL).
-- **Custom Event Tracking**: Supports typed event payloads with nested event data properties for funnels, button clicks, and feature usage without vendor lock-in.
+## Events and privacy
 
-## Configuration & Environment Variables
+Umami event data supports strings, numbers, booleans, arrays, and objects. The shared
+seam still keeps the contract small and low-cardinality. Never allowlist email addresses,
+authentication subjects, prompts, transcripts, secrets, payment data, unrestricted
+user content, or full URL query strings.
 
-Umami requires your public Website ID (UUID) and your Umami instance Host URL.
+The tracker normally sends data to the origin that served its script. `data-host-url`
+may override that destination. Both the configured host and script must use HTTPS;
+the product-domain allowlist controls where the tracker may run.
 
-| Key | Shape | Purpose |
-| --- | --- | --- |
-| `NEXT_PUBLIC_UMAMI_WEBSITE_ID` | `9420c944-2450-48e0-bb15-84e0c460a80e` | **Required**. The website UUID generated in your Umami dashboard |
-| `NEXT_PUBLIC_UMAMI_HOST_URL` | `https://cloud.umami.is` or `https://analytics.my-domain.com` | **Required**. The HTTPS endpoint of your Umami instance |
-| `NEXT_PUBLIC_UMAMI_DOMAINS` | `example.com, app.example.com` | Optional comma-separated list of allowed domains where tracking should execute |
-| `NEXT_PUBLIC_UMAMI_SCRIPT_URL` | `https://cloud.umami.is/script.js` | Optional custom tracker script URL |
+## Verification
 
-Set these variables in `.env.local` for local development and in your production deployment environment (Netlify / Vercel / Convex):
+The local dry run prepares and scrubs a payload only. It returns
+`acceptedByAdapter: true` and `delivered: false`; it is not provider evidence.
 
-```bash
-NEXT_PUBLIC_UMAMI_WEBSITE_ID=9420c944-2450-48e0-bb15-84e0c460a80e
-NEXT_PUBLIC_UMAMI_HOST_URL=https://cloud.umami.is
-```
+For a real check:
 
-## CSP & Allowed Origins
+1. Load the product from an allowlisted hostname with Umami selected.
+2. Send one synthetic custom event through `umami.track()`.
+3. Confirm the event in the Umami dashboard and remove or exclude it from product reporting.
+4. Confirm a non-allowlisted hostname does not dispatch an event.
+5. Confirm the product's consent behavior matches its published privacy policy. A
+   cookie-free tracker does not by itself decide the product's legal consent duty.
+6. Run `pnpm preflight --prod` with the production public variables available.
 
-When loading Umami:
-- Add your Umami host URL (e.g. `https://cloud.umami.is`) to `script-src` and `connect-src` in `next.config.ts`, OR
-- Use Next.js rewrites to proxy `/umami/script.js` and `/umami/api/send` through your own origin to preserve strict `script-src 'self'` and `connect-src 'self'`.
+Network or tracker failure must never interrupt the product workflow.
 
-## Privacy Filters & Data Scrubbing
+## Removal
 
-All custom events and pageviews pass through `filterUmamiData` and `scrubUmamiEvent`:
-- **Email Redaction**: Email addresses inside event payloads are replaced with `[REDACTED_EMAIL]`.
-- **Token & Credential Scrubbing**: Bearer tokens, JWTs, Stripe keys, Sentry tokens, PostHog personal keys, and API secrets are automatically redacted to `[REDACTED_TOKEN]` or `[REDACTED]`.
-- **Prompt & Transcript Scrubbing**: Prompt content, conversation transcripts, system prompts, and debugging ledgers are stripped.
-- **URL Sanitization**: Tracking URLs are stripped of sensitive query parameters (`token`, `auth`, `key`, `secret`, `password`, `email`).
+Delete or disable the website in Umami, remove all Umami public variables from the
+deployment, select another analytics provider or none, and run `pnpm verify`.
 
-## Synthetic Event Verification
-
-To verify that Umami event ingestion is functional without distorting analytics data:
-
-```javascript
-import { createSyntheticUmamiEvent, simulateUmamiCapture } from "./scripts/lib/analytics/umami.mjs";
-
-const syntheticEvent = createSyntheticUmamiEvent({
-  eventName: "checkout_completed",
-  websiteId: "9420c944-2450-48e0-bb15-84e0c460a80e",
-  hostUrl: "https://cloud.umami.is",
-  data: { plan: "pro" },
-});
-
-const { delivered, eventId, payload, scrubbedEvent } = simulateUmamiCapture(syntheticEvent, {
-  websiteId: "9420c944-2450-48e0-bb15-84e0c460a80e",
-  hostUrl: "https://cloud.umami.is",
-});
-```
-
-Synthetic events include `synthetic: "true"` and `verification: "true"` in their payload data.
-
-## Non-Blocking Unconfigured Behavior
-
-Analytics is optional. If `NEXT_PUBLIC_UMAMI_WEBSITE_ID` or `NEXT_PUBLIC_UMAMI_HOST_URL` is missing:
-- `createUmamiClient()` returns a safe, no-op client.
-- `isInitialized()` returns `false`.
-- Calls to `track()`, `trackPageview()`, and `identify()` return `{ success: true, delivered: false, reason: "unconfigured" }` without throwing errors.
-
-## Preflight Validation
-
-Run preflight checks to audit Umami configuration before production launch:
-
-```bash
-pnpm preflight
-pnpm preflight --prod
-```
-
-Preflight enforces:
-- `NEXT_PUBLIC_UMAMI_WEBSITE_ID` is a valid UUID string.
-- `NEXT_PUBLIC_UMAMI_HOST_URL` uses HTTPS and is a well-formed URL.
-
-## Teardown & Removal
-
-To disconnect Umami:
-1. Remove `NEXT_PUBLIC_UMAMI_WEBSITE_ID` and `NEXT_PUBLIC_UMAMI_HOST_URL` from `.env.local` and your deployment environment.
-2. In the Umami dashboard, delete or disable the website under **Settings → Websites**.
-3. Run `pnpm verify` to confirm clean builds and passing tests.
+Official references: [tracker configuration](https://docs.umami.is/docs/tracker-configuration),
+[tracker functions](https://docs.umami.is/docs/tracker-functions), and
+[event data](https://docs.umami.is/docs/event-data).

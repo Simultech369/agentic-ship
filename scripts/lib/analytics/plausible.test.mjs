@@ -5,9 +5,11 @@ import {
   createSyntheticPlausibleEvent,
   filterPlausibleProps,
   getPublicPlausibleConfig,
-  isValidPlausibleApiHost,
+  isValidPlausibleEventEndpoint,
   isValidPlausibleDomain,
   isValidPlausibleScriptUrl,
+  isSafePlausibleUrl,
+  parsePlausibleAllowedOrigins,
   scrubPlausibleEvent,
   simulatePlausibleCapture,
 } from "./plausible.mjs";
@@ -34,7 +36,8 @@ describe("Plausible domain and URL validation", () => {
   });
 
   test("validates script URL must be HTTPS", () => {
-    expect(isValidPlausibleScriptUrl("https://plausible.io/js/script.js")).toBe(true);
+    expect(isValidPlausibleScriptUrl("https://plausible.io/js/script.js")).toBe(false);
+    expect(isValidPlausibleScriptUrl("https://plausible.io/js/pa-fixture.js")).toBe(true);
     expect(isValidPlausibleScriptUrl("https://stats.example.com/js/script.tagged-events.js")).toBe(true);
     expect(isValidPlausibleScriptUrl("http://insecure.com/js/script.js")).toBe(false);
     expect(isValidPlausibleScriptUrl("not-a-url")).toBe(false);
@@ -42,10 +45,22 @@ describe("Plausible domain and URL validation", () => {
   });
 
   test("validates API host URL must be HTTPS", () => {
-    expect(isValidPlausibleApiHost("https://plausible.io")).toBe(true);
-    expect(isValidPlausibleApiHost("https://analytics.custom-domain.com")).toBe(true);
-    expect(isValidPlausibleApiHost("http://insecure.com")).toBe(false);
-    expect(isValidPlausibleApiHost("not-a-url")).toBe(false);
+    expect(isValidPlausibleEventEndpoint("https://plausible.io/api/event")).toBe(true);
+    expect(isValidPlausibleEventEndpoint("https://analytics.custom-domain.com/api/event")).toBe(true);
+    expect(isValidPlausibleEventEndpoint("http://insecure.com/api/event")).toBe(false);
+    expect(isValidPlausibleEventEndpoint("not-a-url")).toBe(false);
+  });
+
+  test("allows same-origin proxy paths and rejects unlisted remote origins", () => {
+    expect(isSafePlausibleUrl("/stats/site.js", [])).toBe(true);
+    expect(isSafePlausibleUrl("//evil.example/site.js", [])).toBe(false);
+    expect(isSafePlausibleUrl("https://stats.example.com/site.js", ["https://stats.example.com"])).toBe(true);
+    expect(isSafePlausibleUrl("https://lookalike.example/site.js", ["https://stats.example.com"])).toBe(false);
+  });
+
+  test("normalizes only exact credential-free HTTPS origins", () => {
+    expect(parsePlausibleAllowedOrigins("https://plausible.io, https://stats.example.com/")).toEqual(["https://plausible.io", "https://stats.example.com"]);
+    expect(parsePlausibleAllowedOrigins("https://user:pass@stats.example.com,https://stats.example.com/path,http://stats.example.com")).toEqual([]);
   });
 });
 
@@ -60,16 +75,26 @@ describe("Plausible public configuration", () => {
   test("generates enabled config with valid domain and options", () => {
     const config = getPublicPlausibleConfig({
       domain: "my-saas.com",
-      scriptUrl: "https://plausible.io/js/script.tagged-events.outbound-links.js",
+      scriptUrl: "https://plausible.io/js/pa-fixture.js",
       outboundLinks: true,
       taggedEvents: true,
     });
     expect(config.enabled).toBe(true);
     expect(config.domain).toBe("my-saas.com");
-    expect(config.scriptUrl).toBe("https://plausible.io/js/script.tagged-events.outbound-links.js");
+    expect(config.scriptUrl).toBe("https://plausible.io/js/pa-fixture.js");
     expect(config.outboundLinks).toBe(true);
     expect(config.taggedEvents).toBe(true);
     expect(config.hashMode).toBe(false);
+  });
+
+  test("enables a self-hosted endpoint only when its origin is explicit", () => {
+    const options = {
+      domain: "my-saas.com",
+      scriptUrl: "https://stats.my-saas.com/js/site.js",
+      eventEndpoint: "https://stats.my-saas.com/api/event",
+    };
+    expect(getPublicPlausibleConfig(options).enabled).toBe(false);
+    expect(getPublicPlausibleConfig({ ...options, allowedOrigins: ["https://stats.my-saas.com"] }).enabled).toBe(true);
   });
 });
 
@@ -119,6 +144,7 @@ describe("Plausible privacy filtering and data scrubbing", () => {
       systemPrompt: "You are an AI assistant.",
       transcript: "User: hello, Assistant: hi",
       healLedger: "Healing step 1",
+      userContent: "unrestricted customer text",
       featureName: "billing-v2",
     };
 
@@ -128,6 +154,7 @@ describe("Plausible privacy filtering and data scrubbing", () => {
     expect(filtered.systemPrompt).toBe("[REDACTED_PROMPT]");
     expect(filtered.transcript).toBe("[REDACTED_PROMPT]");
     expect(filtered.healLedger).toBe("[REDACTED_PROMPT]");
+    expect(filtered.userContent).toBe("[REDACTED]");
   });
 
   test("scrubs query parameter secrets from event URLs", () => {
@@ -141,7 +168,7 @@ describe("Plausible privacy filtering and data scrubbing", () => {
     expect(scrubbed.name).toBe("checkout_view");
     expect(scrubbed.url).not.toContain("secret123");
     expect(scrubbed.url).not.toContain("key456");
-    expect(scrubbed.url).toContain("plan=pro");
+    expect(scrubbed.url).not.toContain("plan=pro");
     expect(scrubbed.props.checkoutId).toBe("chk_123");
   });
 });
@@ -170,8 +197,9 @@ describe("Plausible synthetic event testing", () => {
     });
 
     const result = simulatePlausibleCapture(event, { domain: "saas.io" });
-    expect(result.delivered).toBe(true);
-    expect(result.eventId).toBeDefined();
+    expect(result.delivered).toBe(false);
+    expect(result.acceptedByAdapter).toBe(true);
+    expect(result.reason).toBe("dry_run");
     expect(result.apiEndpoint).toBe("https://plausible.io/api/event");
     expect(result.payload.name).toBe("feature_used");
     expect(result.payload.domain).toBe("saas.io");
@@ -204,21 +232,42 @@ describe("Plausible client non-blocking behavior", () => {
   });
 
   test("tracks events and pageviews when properly configured", () => {
-    const client = createPlausibleClient({ domain: "my-app.com" });
+    const calls = [];
+    const client = createPlausibleClient({
+      domain: "my-app.com",
+      scriptUrl: "https://plausible.io/js/pa-fixture.js",
+      tracker: (...args) => calls.push(args),
+      allowedEvents: ["button_clicked"],
+      allowedProperties: ["buttonId"],
+    });
     expect(client.isInitialized()).toBe(true);
     expect(client.getConfig().enabled).toBe(true);
 
     const eventResult = client.trackEvent("button_clicked", { props: { buttonId: "hero_cta" } });
     expect(eventResult.success).toBe(true);
-    expect(eventResult.delivered).toBe(true);
+    expect(eventResult.dispatched).toBe(true);
+    expect(eventResult.delivered).toBe(false);
     expect(eventResult.eventName).toBe("button_clicked");
     expect(eventResult.domain).toBe("my-app.com");
     expect(eventResult.props.buttonId).toBe("hero_cta");
 
     const pageviewResult = client.trackPageview();
     expect(pageviewResult.success).toBe(true);
-    expect(pageviewResult.delivered).toBe(true);
+    expect(pageviewResult.dispatched).toBe(true);
+    expect(pageviewResult.delivered).toBe(false);
     expect(pageviewResult.eventName).toBe("pageview");
     expect(pageviewResult.domain).toBe("my-app.com");
+    expect(calls).toHaveLength(2);
+    expect(client.trackEvent("customer_supplied_name", { props: { userContent: "private" } })).toMatchObject({ dispatched: false, reason: "event_not_allowed" });
+  });
+
+  test("tracker failures remain non-blocking and do not claim dispatch", () => {
+    const client = createPlausibleClient({
+      domain: "my-app.com",
+      scriptUrl: "https://plausible.io/js/pa-fixture.js",
+      tracker: () => { throw new Error("blocked"); },
+      allowedEvents: ["signup"],
+    });
+    expect(client.trackEvent("signup")).toMatchObject({ success: true, dispatched: false, delivered: false, reason: "tracker_error" });
   });
 });

@@ -124,6 +124,16 @@ test("plausible can be selected as alternative analytics provider", () => {
   });
 });
 
+test("postmark can be selected as alternative email provider", () => {
+  expect(resolveProviderSelection({ email: "postmark" })).toEqual({
+    billing: "stripe",
+    email: "postmark",
+    analytics: "posthog",
+    deployment: "netlify",
+    tracking: "linear",
+  });
+});
+
 test("umami can be selected as alternative analytics provider", () => {
   expect(resolveProviderSelection({ analytics: "umami" })).toEqual({
     billing: "stripe",
@@ -136,4 +146,16 @@ test("umami can be selected as alternative analytics provider", () => {
 
 test("an invalid analytics provider is rejected", () => {
   expect(() => resolveProviderSelection({ analytics: "google-analytics" })).toThrow(/Unsupported analytics provider/);
+});
+
+test("Sentry observability is optional and selectable", () => {
+  expect(resolveProviderSelection({ observability: "sentry" })).toEqual({
+    billing: "stripe",
+    email: "resend",
+    analytics: "posthog",
+    deployment: "netlify",
+    tracking: "linear",
+    observability: "sentry",
+  });
+  expect(resolveProviderSelection({ observability: null }).observability).toBe(null);
 });
