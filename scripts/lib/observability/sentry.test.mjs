@@ -18,7 +18,8 @@ import {
   createSentryBeforeSend,
   createSyntheticVerificationEvent,
   simulateSentryCapture,
-  createSentryClient,
+  createSentryTestClient,
+  inspectSentryBlueprint,
   inspectObservabilityCoherence,
   inspectProductionObservabilityEnvironment,
 } from "./sentry.mjs";
@@ -340,18 +341,18 @@ describe("Synthetic Error Verification Event Generator", () => {
   test("simulates Sentry error capture against scrubber pipeline", () => {
     const fakeToken = ["sntrys", "abcdef0123456789abcdef0123456789"].join("_");
     const sensitiveError = new Error(`Failed connect with token ${fakeToken} for user@example.com`);
-    const { delivered, eventId, scrubbedEvent } = simulateSentryCapture(sensitiveError);
+    const { acceptedByScrubber, eventId, scrubbedEvent } = simulateSentryCapture(sensitiveError);
 
-    expect(delivered).toBe(true);
+    expect(acceptedByScrubber).toBe(true);
     expect(eventId).toMatch(/^[a-f0-9]{32}$/);
     expect(scrubbedEvent.exception.values[0].value).toContain("[REDACTED_SENTRY_TOKEN]");
     expect(scrubbedEvent.exception.values[0].value).toContain("[REDACTED_EMAIL]");
   });
 });
 
-describe("Optional Sentry Client Initialization", () => {
+describe("In-memory Sentry test harness", () => {
   test("creates a no-op client when DSN is missing or enabled=false", () => {
-    const noopClient = createSentryClient({ enabled: false });
+    const noopClient = createSentryTestClient({ enabled: false });
     expect(noopClient.isInitialized()).toBe(false);
     expect(noopClient.getDsn()).toBe(null);
     expect(noopClient.captureException(new Error("silent error"))).toBe("");
@@ -364,7 +365,7 @@ describe("Optional Sentry Client Initialization", () => {
   });
 
   test("creates an active client wrapper when valid DSN is provided and enabled", () => {
-    const client = createSentryClient({
+    const client = createSentryTestClient({
       dsn: "https://abcdef1234567890abcdef1234567890@o12345.ingest.sentry.io/123",
       enabled: true,
       environment: "test",
@@ -412,18 +413,36 @@ describe("Connection Catalog & Sentry Provider Registration", () => {
   test("Sentry project probes validate against catalog requirements", () => {
     const catalog = loadConnectionCatalog({ projectRoot: repositoryRoot });
     const sentry = catalog.providers.sentry;
-    expect(sentry.projectProvisioning.verification.policy).toBe("machine");
-    expect(sentry.projectProvisioning.verification.probes.length).toBeGreaterThanOrEqual(2);
+    expect(sentry.projectProvisioning.verification.policy).toBe("probe_and_attestation");
+    expect(sentry.projectProvisioning.verification.probes).toEqual([
+      expect.objectContaining({ id: "sentry-blueprint", type: "sentry_blueprint", required: true }),
+    ]);
+  });
+});
 
-    const dsnProbe = sentry.projectProvisioning.verification.probes.find((p) => p.id === "public-dsn");
-    expect(dsnProbe).toBeDefined();
-    expect(dsnProbe.type).toBe("env_file_key");
-    expect(dsnProbe.key).toBe("NEXT_PUBLIC_SENTRY_DSN");
-    expect(dsnProbe.allowPrefixes).toContain("https://");
+describe("Sentry downstream blueprint", () => {
+  const init = `Sentry.init({ environment: process.env.NODE_ENV, release: process.env.SENTRY_RELEASE, beforeSend: scrubSentryEvent });`;
+  const complete = {
+    packageJsonSource: JSON.stringify({ dependencies: { "@sentry/nextjs": "^10.0.0" } }),
+    observabilitySource: `export function scrubSentryEvent(event) { const blocked = "authorization cookie prompt transcript"; return event; }`,
+    clientSource: `import * as Sentry from "@sentry/nextjs"; const scrubSentryEvent = value => value; ${init} Sentry.init({ enabled: process.env.NODE_ENV === "production" || process.env.SENTRY_ENABLE_DEV === "true", environment: process.env.NODE_ENV, release: process.env.SENTRY_RELEASE, beforeSend: scrubSentryEvent });`,
+    serverSource: `const scrubSentryEvent = value => value; ${init}`,
+    edgeSource: `const scrubSentryEvent = value => value; ${init}`,
+    nextConfigSource: `withSentryConfig(config, { authToken: process.env.SENTRY_AUTH_TOKEN, org: process.env.SENTRY_ORG, project: process.env.SENTRY_PROJECT, release: { name: process.env.SENTRY_RELEASE } })`,
+  };
 
-    const seamProbe = sentry.projectProvisioning.verification.probes.find((p) => p.id === "observability-seam");
-    expect(seamProbe).toBeDefined();
-    expect(seamProbe.type).toBe("any_file_exists");
+  test("accepts one complete browser, server, edge, privacy, release, and source-map contract", () => {
+    expect(inspectSentryBlueprint(complete).status).toBe("PASS");
+  });
+
+  test("stays optional when Sentry is absent", () => {
+    expect(inspectSentryBlueprint({}).status).toBe("SKIP");
+  });
+
+  test("rejects partial setup and browser credential exposure", () => {
+    const result = inspectSentryBlueprint({ ...complete, clientSource: `${complete.clientSource} process.env.SENTRY_AUTH_TOKEN` });
+    expect(result.status).toBe("FAIL");
+    expect(result.detail).toContain("browser auth-token isolation");
   });
 });
 
@@ -448,9 +467,20 @@ describe("Observability Coherence & Preflight Inspections", () => {
   });
 
   test("inspectProductionObservabilityEnvironment validates production Sentry DSN", () => {
-    const validProdEnv = "NEXT_PUBLIC_SENTRY_DSN=https://key@o123.ingest.sentry.io/456\n";
+    const authToken = ["sntrys", "1234567890abcdef1234567890"].join("_");
+    const validProdEnv = [
+      "NEXT_PUBLIC_SENTRY_DSN=https://key@o123.ingest.sentry.io/456",
+      `SENTRY_AUTH_TOKEN=${authToken}`,
+      "SENTRY_ORG=example-org",
+      "SENTRY_PROJECT=example-project",
+      "SENTRY_RELEASE=release-123",
+    ].join("\n");
     const validResult = inspectProductionObservabilityEnvironment(validProdEnv);
     expect(validResult.status).toBe("PASS");
+
+    const missingBuildResult = inspectProductionObservabilityEnvironment("NEXT_PUBLIC_SENTRY_DSN=https://key@o123.ingest.sentry.io/456\n");
+    expect(missingBuildResult.status).toBe("FAIL");
+    expect(missingBuildResult.detail).toContain("SENTRY_RELEASE");
 
     const invalidProdEnv = "NEXT_PUBLIC_SENTRY_DSN=http://insecure@sentry.io/456\n";
     const invalidResult = inspectProductionObservabilityEnvironment(invalidProdEnv);

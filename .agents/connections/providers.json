@@ -1033,6 +1033,51 @@
         }
       ]
     },
+    "postmark": {
+      "displayName": "Postmark",
+      "capability": "email",
+      "defaultForCapability": false,
+      "docsUrl": "https://postmarkapp.com/developer",
+      "actionTtlMinutes": 1440,
+      "maxVerificationAttempts": 5,
+      "projectProvisioning": {
+        "setupUrl": "https://account.postmarkapp.com/servers",
+        "instructions": [
+          "Choose or create the Postmark Server and Transactional Message Stream for this project.",
+          "Retrieve the Server API Token under Server → API Tokens, then run `pnpm secret:set POSTMARK_SERVER_TOKEN` in your own terminal — hidden input, piped straight into the Convex deployment env.",
+          "Register the webhook endpoint `<convex-site-url>/postmark/webhook` under Server → Webhooks for Delivery, Bounce, and Spam Complaint events. Configure `X-Postmark-Secret` as a custom header, or HTTP Basic Auth with `postmark` as the username, then run `pnpm secret:set POSTMARK_WEBHOOK_SECRET` the same way.",
+          "Verify the payload in non-production with Postmark's `POSTMARK_API_TEST` server token. Verify the sending domain (DKIM and Return-Path) before production. `pnpm preflight --prod` sends one message to Postmark's black-hole sink to prove live sending without contacting a person."
+        ],
+        "verification": {
+          "policy": "probe_and_attestation",
+          "probes": [
+            {
+              "id": "postmark-blueprint",
+              "label": "Postmark email and webhook blueprint is complete",
+              "type": "postmark_blueprint",
+              "required": true
+            }
+          ]
+        },
+        "automation": {
+          "run": [
+            {
+              "command": "pnpm open:url https://account.postmarkapp.com/servers",
+              "opensBrowser": true,
+              "why": "Open Postmark Servers page to obtain the Server API Token and configure webhook endpoints."
+            }
+          ]
+        }
+      },
+      "revocation": [
+        {
+          "text": "Revoke the Server API Token under Postmark Server → API Tokens."
+        },
+        {
+          "text": "Delete the /postmark/webhook endpoint under Postmark Server → Webhooks."
+        }
+      ]
+    },
     "sentry": {
       "displayName": "Sentry",
       "capability": "observability",
@@ -1043,34 +1088,19 @@
       "projectProvisioning": {
         "setupUrl": "https://sentry.io/settings/projects/",
         "instructions": [
-          "Create or select your Sentry project in the Sentry dashboard.",
-          "Copy the public Client Keys (DSN) into NEXT_PUBLIC_SENTRY_DSN in `.env.local` — public DSNs are safe for client bundles and contain no secret tokens.",
-          "Store sensitive upload credentials like SENTRY_AUTH_TOKEN in your deployment provider or CI secret store with `pnpm secret:set`, never in git or `.env.local`.",
-          "Verify that the Sentry data scrubber and beforeSend filter redact PII, tokens, headers, and prompts before errors leave the environment."
+          "Create or select a JavaScript project for the Next.js application and copy its public Client Key (DSN).",
+          "Install the official Next.js SDK and implement the browser, server, and edge initialization files against the shared scrubSentryEvent seam. Keep local development disabled unless SENTRY_ENABLE_DEV is explicitly true.",
+          "Store SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT, and SENTRY_RELEASE in the deployment or CI build environment. The token needs org:ci for release and source-map upload and must never enter a NEXT_PUBLIC variable.",
+          "For Convex exceptions, enable Sentry from the production deployment's Dashboard → Settings → Integrations with a Node.js Sentry project. Convex owns that integration; do not add an SDK to Convex functions.",
+          "Send a synthetic SDK exception with no personal data, confirm its release and environment in Sentry, and attest that the Convex dashboard integration is active."
         ],
         "verification": {
-          "policy": "machine",
+          "policy": "probe_and_attestation",
           "probes": [
             {
-              "id": "public-dsn",
-              "label": "Public Sentry DSN exists",
-              "type": "env_file_key",
-              "file": ".env.local",
-              "key": "NEXT_PUBLIC_SENTRY_DSN",
-              "allowPrefixes": [
-                "https://"
-              ],
-              "required": true
-            },
-            {
-              "id": "observability-seam",
-              "label": "Sentry observability seam exists",
-              "type": "any_file_exists",
-              "paths": [
-                "src/lib/observability.ts",
-                "sentry.client.config.ts",
-                "sentry.client.config.js"
-              ],
+              "id": "sentry-blueprint",
+              "label": "Sentry runtime, privacy, release, and source-map blueprint is complete",
+              "type": "sentry_blueprint",
               "required": true
             }
           ]

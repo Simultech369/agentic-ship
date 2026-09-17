@@ -1,124 +1,85 @@
-# Observability — Sentry via Scrubber Seam
+# Sentry observability
 
-Reference for the convex-structure skill. Sentry provides real-time error tracking, exception monitoring, and release health with strict client-side data scrubbing and credential isolation.
+Use Sentry only when the product brief selects `providerSelection.observability` as
+`sentry`. Observability is optional: a downstream product with no Sentry files or
+environment values must still install, build, and verify successfully.
 
-## The pieces
+## Ownership
 
-| Piece | Owner | Job |
-| --- | --- | --- |
-| Sentry Ingestion API | Sentry (vendor) | Ingests scrubbed error events, groups issues, and tracks release health |
-| `scripts/lib/observability/sentry.mjs` | this repo | Sentry integration helpers: DSN validation, comprehensive data scrubber, synthetic verification generator, and preflight gates |
-| `src/lib/observability.ts` | this repo | The client/server observability seam — wraps optional Sentry client initialization with `beforeSend` scrubbing |
-| Sentry CLI / Next Plugin | Build / CI | Uploads release source maps using build-time `SENTRY_AUTH_TOKEN` without embedding tokens into runtime bundles |
+The official `@sentry/nextjs` SDK owns browser, server, and edge reporting. The product
+owns one `src/lib/observability.ts` seam with `scrubSentryEvent`; every Sentry
+initialization passes that function as `beforeSend`. Do not use the in-memory test
+harness in `scripts/lib/observability/sentry.mjs` as a runtime client.
 
-## Setup & Secret Requirements
+Convex exceptions use Convex's built-in Sentry integration. Enable it from the
+production deployment's Dashboard under Settings → Integrations and choose a Node.js
+Sentry project. Do not import a Sentry SDK into Convex functions. Convex currently
+offers this integration on paid deployments and owns the exception transport.
 
-Sentry separates public project keys (DSNs) from privileged management credentials (`SENTRY_AUTH_TOKEN`).
+## Runtime files
 
-1. **Public Client DSN (`NEXT_PUBLIC_SENTRY_DSN`)**:
-   - Obtain your public DSN in the Sentry dashboard under **Project Settings → Client Keys (DSN)**.
-   - Format: `https://<publicKey>@<host>/<projectId>` (e.g. `https://o12345.ingest.sentry.io/67890`).
-   - Store it in `.env.local` for local development or set it in your deployment provider environment:
-     ```bash
-     NEXT_PUBLIC_SENTRY_DSN=https://examplePublicKey@o0.ingest.sentry.io/0
-     ```
-   - Public DSNs are safe for browser bundles and contain no secret tokens.
-2. **Server-Side DSN (`SENTRY_DSN`)**:
-   - For backend (Convex / Node.js) error capture, set `SENTRY_DSN` in the Convex deployment environment:
-     ```bash
-     npx convex env set SENTRY_DSN "https://examplePublicKey@o0.ingest.sentry.io/0"
-     ```
-3. **Source Map Auth Token (`SENTRY_AUTH_TOKEN`)**:
-   - Create an organization auth token in Sentry under **Settings → Developer Settings → Custom Integrations / Auth Tokens** with `project:releases` scope.
-   - Store it in your deployment environment or CI secrets (Netlify / Vercel / GitHub Actions):
-     ```bash
-     pnpm secret:set SENTRY_AUTH_TOKEN
-     ```
-   - **CRITICAL RULE**: `SENTRY_AUTH_TOKEN` must NEVER be placed in `.env.local` as a `NEXT_PUBLIC_*` variable, committed to git, or exposed to the browser.
+The downstream product needs all of these surfaces:
 
-## Comprehensive Scrubbing & Data Redaction
+- `instrumentation-client.ts` for browser initialization;
+- `sentry.server.config.ts` for the Node.js server runtime;
+- `sentry.edge.config.ts` for the edge runtime;
+- `src/lib/observability.ts` for the shared scrubber;
+- `next.config.ts` wrapped with `withSentryConfig` for release and source-map upload.
 
-All Sentry events pass through `scrubSentryEvent` in `scripts/lib/observability/sentry.mjs` via `beforeSend` before leaving the application runtime:
+Each initialization sets `environment`, `release`, and `beforeSend`. Keep
+`sendDefaultPii` false. Browser initialization must set `enabled` so development stays
+quiet unless `SENTRY_ENABLE_DEV=true` is intentionally present.
 
-### 1. Sensitive Request & Auth Headers
-The following headers are automatically replaced with `"[REDACTED]"`:
-- `Authorization`, `Proxy-Authorization`, `X-Api-Key`, `X-Auth-Token`
-- `Cookie`, `Set-Cookie`, `Better-Auth-Secret`
-- `X-Postmark-Secret`, `X-Webhook-Secret`, `Stripe-Signature`, `X-Polar-Signature`, `X-Signature`
-- `X-Sentry-Token`, `X-Sentry-Auth`
+## Environment boundary
 
-### 2. Secrets & Credentials in Text and Values
-String values, messages, breadcrumb data, stack traces, and query parameters are scanned and redacted:
-- Bearer tokens: `Bearer [REDACTED]`
-- JWT tokens: `[REDACTED_JWT]`
-- Sentry auth tokens: `[REDACTED_SENTRY_TOKEN]`
-- Stripe secret keys (`sk_live_`, `rk_live_`, `sk_test_`, `whsec_`): `[REDACTED_STRIPE_KEY]`
-- PostHog personal keys (`phx_`): `[REDACTED_POSTHOG_KEY]`
-- Resend API keys (`re_`): `[REDACTED_RESEND_KEY]`
-- Credit card numbers: `[REDACTED_CARD]`
-- Passwords and secret query parameters: `[REDACTED]`
+`NEXT_PUBLIC_SENTRY_DSN` is a public client key and may enter the browser bundle.
+These build values are not public:
 
-### 3. Agent Prompts, Transcripts, and Contexts
-Keys matching prompt, transcript, or AI conversation context (`prompt`, `prompts`, `rawPrompt`, `systemPrompt`, `userPrompt`, `userInput`, `transcript`, `transcripts`, `messages`, `conversation`, `instructions`, `agentState`, `healLedger`) are redacted to `"[REDACTED_PROMPT]"` or `"[REDACTED]"`.
+- `SENTRY_AUTH_TOKEN` — organization token with the `org:ci` permission;
+- `SENTRY_ORG` — organization slug;
+- `SENTRY_PROJECT` — project slug;
+- `SENTRY_RELEASE` — immutable release identifier shared by uploads and events.
 
-### 4. User Data & PII
-- `event.user.ip_address` is replaced with `"[REDACTED_IP]"`.
-- `event.user.email` is replaced with `"[REDACTED_EMAIL]"`.
-- Pseudonymous identifiers (e.g. anonymous `id`) are preserved for aggregate issue tracking.
+Keep those four values in the deployment or CI build environment. Never create
+`NEXT_PUBLIC_SENTRY_AUTH_TOKEN`. The Next.js config reads them from `process.env` and
+passes them to `withSentryConfig`; source maps are uploaded during the production
+build and are not a runtime credential.
 
-### 5. Request Bodies & Query Strings
-- `event.request.data` is parsed and recursively scrubbed for sensitive field names (`password`, `token`, `secret`, `apiKey`, `creditCard`, `cvv`, `ssn`).
-- URLs have query string secrets (`token`, `key`, `secret`, `password`, `code`, `sig`) stripped.
+## Privacy contract
 
-## Synthetic Error Verification
+The shared scrubber removes authorization and cookie headers, request bodies,
+passwords, provider credentials, payment-card values, emails, IP addresses, prompts,
+transcripts, messages, and agent state before an event leaves the runtime. Apply the
+same scrubber to browser, server, and edge events. Keep Sentry's server-side data
+scrubbing and IP-address scrubbing enabled as a second layer.
 
-To verify that error tracking and data scrubbing function without triggering real production errors:
+Set error and trace sampling deliberately for the product's traffic and budget. Record
+the chosen retention period and region in the product's privacy documentation. Do not
+attach screenshots, request bodies, provider payloads, prompts, or transcripts.
 
-1. Use `createSyntheticVerificationEvent` or `simulateSentryCapture` from `scripts/lib/observability/sentry.mjs`:
-   ```javascript
-   import { createSyntheticVerificationEvent, simulateSentryCapture } from "./scripts/lib/observability/sentry.mjs";
+## Verification
 
-   const syntheticEvent = createSyntheticVerificationEvent({
-     message: "Synthetic verification test",
-     error: new Error("Test error for Sentry ingestion verification"),
-     tags: { stage: "staging" },
-   });
+Run:
 
-   const { delivered, eventId, scrubbedEvent } = simulateSentryCapture(syntheticEvent);
-   ```
-2. Verify that `synthetic: "true"` and `verification: "true"` tags are attached.
-3. In Sentry Issue Stream, verify that no raw auth tokens, user emails, or prompts appear in the event detail.
-
-## Optional Initialization Pattern
-
-Observability is optional. If `NEXT_PUBLIC_SENTRY_DSN` is absent or unconfigured:
-- `createSentryClient()` returns a safe, no-op client.
-- `isInitialized()` returns `false`.
-- Calls to `captureException()`, `captureMessage()`, and `addBreadcrumb()` safely no-op without throwing runtime errors or network failures.
-
-## Going to production & Preflight Checks
-
-Run preflight to verify observability configuration before shipping:
 ```bash
-pnpm preflight
-```
-And for production deployment audit:
-```bash
+pnpm onboard sentry --host codex
 pnpm preflight --prod
 ```
 
-Preflight enforces:
-- `no sensitive Sentry auth token in client env`: flags `NEXT_PUBLIC_SENTRY_AUTH_TOKEN` as a blocking FAIL.
-- `prod Sentry observability is valid`: when Sentry is configured, verifies that the production DSN uses HTTPS and is well-formed.
+The machine probe rejects an incomplete SDK dependency, missing browser/server/edge
+initialization, absent scrubber, development noise, public auth token, or missing
+release/source-map build values.
 
-## Removal & Teardown
+Then send one synthetic exception through the official SDK. Use fixed non-personal
+text, set `synthetic=true`, and confirm in Sentry that the event has the expected
+environment and `SENTRY_RELEASE`. Also attest that the Convex dashboard integration is
+active. The helper `simulateSentryCapture` verifies local scrubbing only; it does not
+claim remote delivery.
 
-To disconnect Sentry:
-1. Remove `NEXT_PUBLIC_SENTRY_DSN` from `.env.local` and your deployment environment.
-2. Remove `SENTRY_DSN` from the Convex deployment environment:
-   ```bash
-   npx convex env remove SENTRY_DSN
-   ```
-3. Revoke `SENTRY_AUTH_TOKEN` in Sentry under **Settings → Developer Settings → Auth Tokens**.
-4. Disable or delete the Client Key in Sentry under **Project Settings → Client Keys (DSN)**.
-5. Run `pnpm verify` to confirm clean builds and passing tests.
+## Removal or replacement
+
+Remove the three runtime initialization files and `withSentryConfig`, remove the SDK,
+delete the Sentry environment values from the deployment provider, disable the Convex
+dashboard integration, and revoke the organization token in Sentry. Disable or rotate
+the client key to stop ingestion. Run `pnpm verify` and `pnpm preflight --prod` after
+the replacement is wired.

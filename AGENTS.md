@@ -86,7 +86,7 @@ Windows. The buyer may be on any of the three.
 | `pnpm sync:mcp` · `pnpm check:mcp` | write / verify the `.cursor/mcp.json` mirror |
 | `pnpm sync:agents` · `pnpm check:agents` | write / verify native Claude plugin, Codex, Cursor, Hermes, and OpenClaw role adapters |
 | `pnpm check:commands` | every `pnpm` name in prose resolves to a real script, and `skills.lock.json` matches disk |
-| `pnpm check:readme` | verify that the README's supported deployment providers match the connection catalog |
+| `pnpm check:readme` | verify that the README's supported providers match the connection catalog |
 | `pnpm secret` | print one random base64 secret |
 
 `pnpm install` runs the link, MCP, and agent-adapter synchronizers through `postinstall`.
@@ -559,20 +559,46 @@ lifecycle, and revocation details. Stripe uses `stripe-billing.md`; Polar uses
   writing every row against that workspace's own `ownerId` — it creates no user, grants
   no membership and moves no plan, so seeding can never hand anyone access.
 
-## Email rules (Resend, wired)
+## Email rules (replaceable provider, Resend default)
 
-Detail: `.agents/skills/convex-structure/references/email-resend.md`.
+Details: `.agents/skills/convex-structure/references/email-resend.md` and `.agents/skills/convex-structure/references/email-postmark.md`.
 
-- `convex/email.ts` is the only file that imports the Resend SDK. Every outbound email
-  goes through it; adding one means adding a function there, never a direct API call.
-- Sends are enqueued **inside the calling transaction** by the component. Do not write
-  retry logic, and do not send from a client.
-- `testMode: true` is the shipped default — only Resend's test inboxes can receive mail.
+The product brief selects one email provider: Resend remains the default; Postmark is the supported alternative.
+
+- `convex/email.ts` is the only file that imports the email provider SDK. Every outbound email
+  goes through it; adding one means adding a function there, never a direct API call from domain code.
+- Sends are enqueued or dispatched through the backend seam inside the calling transaction.
+- `testMode: true` is the shipped default — only allowlisted test inboxes or sandbox tokens receive mail.
   It flips to `false` **together with** `requireEmailVerification: true` in
   `convex/auth.ts`, after a sending domain is verified. `pnpm health` fails on either
   half of that pair being wrong.
-- `/resend-webhook` in `convex/http.ts` belongs to the component; it verifies the
-  signature. Never parse a webhook body yourself.
+- `/resend-webhook` verifies Resend signatures. Postmark does not sign webhooks, so
+  `/postmark/webhook` requires HTTP Basic Auth or a configured custom header. Prefer
+  Postmark's trace ID for idempotency, then fall back to an event-specific compound key.
+- In Postmark test mode, use `POSTMARK_API_TEST` as the server token. Disabling open
+  and link tracking does not prevent delivery.
+- Postmark production preflight verifies the live token, transactional stream,
+  authenticated webhook, and sender by sending one message to Postmark's black-hole
+  sink. The sink does not contact a person, but the message counts toward monthly volume.
+
+## Observability rules (optional Sentry)
+
+Details: `.agents/skills/convex-structure/references/observability-sentry.md`.
+
+- Observability is optional. With no selected provider or Sentry configuration, install,
+  build, and verification remain green.
+- The official `@sentry/nextjs` SDK owns browser, server, and edge reporting. All three
+  initializations use the shared `src/lib/observability.ts` scrubber through `beforeSend`.
+- `NEXT_PUBLIC_SENTRY_DSN` is public. `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`,
+  `SENTRY_PROJECT`, and `SENTRY_RELEASE` are build-only values and never use a
+  `NEXT_PUBLIC_` name.
+- Local development stays quiet unless `SENTRY_ENABLE_DEV=true` is explicit. Production
+  events declare environment and release, keep default PII collection off, and upload
+  source maps through `withSentryConfig` using the same release identifier.
+- Convex exceptions use Convex's dashboard-owned Sentry integration with a Node.js
+  project. Do not import the Sentry SDK into Convex functions.
+- A completed setup needs both machine proof of the runtime and source-map blueprint and
+  human confirmation of one non-personal synthetic event plus the Convex integration.
 
 ## Analytics rules (PostHog, wired)
 

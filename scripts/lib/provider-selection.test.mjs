@@ -113,3 +113,25 @@ test("cloudflare can be selected as alternative deployment provider while preser
     tracking: "linear",
   });
 });
+
+test("postmark can be selected as alternative email provider", () => {
+  expect(resolveProviderSelection({ email: "postmark" })).toEqual({
+    billing: "stripe",
+    email: "postmark",
+    analytics: "posthog",
+    deployment: "netlify",
+    tracking: "linear",
+  });
+});
+
+test("Sentry observability is optional and selectable", () => {
+  expect(resolveProviderSelection({ observability: "sentry" })).toEqual({
+    billing: "stripe",
+    email: "resend",
+    analytics: "posthog",
+    deployment: "netlify",
+    tracking: "linear",
+    observability: "sentry",
+  });
+  expect(resolveProviderSelection({ observability: null }).observability).toBe(null);
+});

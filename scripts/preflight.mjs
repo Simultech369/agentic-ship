@@ -20,7 +20,8 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectProductionBillingEnvironment } from "./lib/billing-coherence.mjs";
 import { inspectDeploymentBlueprint } from "./lib/deployment-coherence.mjs";
-import { inspectProductionObservabilityEnvironment } from "./lib/observability/sentry.mjs";
+import { inspectSentryBlueprint } from "./lib/observability/sentry.mjs";
+import { verifyPostmarkLive } from "./lib/email-providers/postmark-live.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : "");
@@ -123,6 +124,18 @@ add(
   localSentryAuthSecret ? "NEXT_PUBLIC_SENTRY_AUTH_TOKEN leaks Sentry auth token to the browser bundle — use SENTRY_AUTH_TOKEN in CI/build only" : "",
 );
 
+const sentryBlueprint = inspectSentryBlueprint({
+  packageJsonSource: read("package.json"),
+  observabilitySource: read("src/lib/observability.ts") || read("src/lib/observability.js"),
+  clientSource: read("instrumentation-client.ts") || read("instrumentation-client.js") || read("sentry.client.config.ts") || read("sentry.client.config.js"),
+  serverSource: read("sentry.server.config.ts") || read("sentry.server.config.js"),
+  edgeSource: read("sentry.edge.config.ts") || read("sentry.edge.config.js"),
+  nextConfigSource: read("next.config.ts") || read("next.config.mjs") || read("next.config.js"),
+});
+if (sentryBlueprint.status !== "SKIP") {
+  add("Sentry runtime and source-map blueprint", sentryBlueprint.status, sentryBlueprint.status === "PASS" ? "" : sentryBlueprint.detail);
+}
+
 /* ---------- the full local gate ---------- */
 
 const verify = spawnSync("pnpm verify:full", { cwd: root, shell: true, encoding: "utf8" });
@@ -159,14 +172,34 @@ if (withProd) {
 
     const billing = inspectProductionBillingEnvironment(env);
     add("prod billing provider is live", billing.status === "PASS" ? "PASS" : "FAIL", billing.status === "PASS" ? "" : billing.detail);
-    add("prod Resend key set", has("RESEND_API_KEY") ? "PASS" : "FAIL", "production sends no email without it");
-    add("prod EMAIL_FROM on a verified domain", has("EMAIL_FROM") && !/resend\.dev/.test(val("EMAIL_FROM")) ? "PASS" : "FAIL", "EMAIL_FROM missing or still the onboarding fallback — verify a sending domain and set it");
+    const emailProvider = val("EMAIL_PROVIDER") || "resend";
+    const multipleEmailProviders = has("RESEND_API_KEY") && has("POSTMARK_SERVER_TOKEN");
+    add(
+      "one production email provider selected",
+      multipleEmailProviders ? "FAIL" : "PASS",
+      multipleEmailProviders ? "remove the unselected provider credential from the production Convex environment" : "",
+    );
+    const isPostmark = emailProvider === "postmark";
+    if (isPostmark) {
+      add("prod Postmark token set", has("POSTMARK_SERVER_TOKEN") ? "PASS" : "FAIL", "production sends no email without it");
+      try {
+        const live = await verifyPostmarkLive({
+          serverToken: val("POSTMARK_SERVER_TOKEN"),
+          webhookSecret: val("POSTMARK_WEBHOOK_SECRET"),
+          from: val("EMAIL_FROM"),
+          messageStream: val("POSTMARK_MESSAGE_STREAM") || "outbound",
+        });
+        add("prod Postmark is live", live.status, live.detail);
+      } catch (error) {
+        add("prod Postmark is live", "FAIL", error instanceof Error ? error.message : "Postmark live verification failed");
+      }
+    } else {
+      add("prod email provider is supported", emailProvider === "resend" ? "PASS" : "FAIL", `unsupported EMAIL_PROVIDER: ${emailProvider}`);
+      add("prod Resend key set", has("RESEND_API_KEY") ? "PASS" : "FAIL", "production sends no email without it");
+    }
+    add("prod EMAIL_FROM on a verified domain", has("EMAIL_FROM") && !/resend\.dev|example\.com/.test(val("EMAIL_FROM")) ? "PASS" : "FAIL", "EMAIL_FROM missing or still the onboarding fallback — verify a sending domain and set it");
     add("prod SITE_URL is https and not localhost", /^https:\/\//.test(val("SITE_URL")) && !/localhost/.test(val("SITE_URL")) ? "PASS" : "FAIL", "auth callbacks and emails will point at the wrong host");
     add("prod auth secret set", has("BETTER_AUTH_SECRET") ? "PASS" : "FAIL", "pnpm secret, then npx convex env set --prod BETTER_AUTH_SECRET ...");
-    const observability = inspectProductionObservabilityEnvironment(env);
-    if (observability.status !== "SKIP") {
-      add("prod Sentry observability is valid", observability.status === "PASS" ? "PASS" : "FAIL", observability.status === "PASS" ? "" : observability.detail);
-    }
     add("NO test-seed backdoor in prod", has("ALLOW_TEST_SEED") ? "FAIL" : "PASS", "ALLOW_TEST_SEED is set on PROD — anyone-callable seeding of production data. Remove it: `npx convex env remove --prod ALLOW_TEST_SEED`");
     add("NO extra trusted auth origin in prod", has("E2E_ORIGIN") ? "FAIL" : "PASS", "E2E_ORIGIN is set on PROD — it adds a trusted origin to Better Auth, which is a CSRF hole outside the browser gate. Remove it: `npx convex env remove --prod E2E_ORIGIN`");
   }

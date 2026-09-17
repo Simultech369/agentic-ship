@@ -834,3 +834,35 @@ Format:
   README sync gate prevents a supported deployment provider from remaining in the
   reader-facing "not wired" list.
 - status: open
+
+## 2026-09-17 postmark-provider-false-green-readiness
+
+- cause: the initial Postmark adapter treated `testMode` and disabled tracking as
+  non-delivery safety, trusted a payload-owned `verified` field, deduplicated delivery
+  events by `MessageID` alone, and called production ready from environment-variable
+  names without checking the live provider.
+- fix: test mode now selects `POSTMARK_API_TEST`, authenticated state stays outside the
+  payload, delivery events prefer Postmark's trace ID or a recipient-specific compound
+  key, suppressed recipients cannot be sent to, and production preflight verifies the
+  live token, transactional stream, authenticated webhook, sender, and black-hole send.
+- prevention: the connection probe now validates one complete Postmark blueprint,
+  provider boundary tests cover spoofed authentication and multi-recipient retries,
+  the live verifier uses mocked remote failure cases, and README sync covers supported
+  billing and email providers as well as deployment providers. Credential-shaped test
+  fixtures are assembled from inert fragments so the repository scanner can distinguish
+  them from committed secrets without excluding the provider tests.
+- status: open
+
+## 2026-09-17 sentry-provider-false-green-readiness
+
+- cause: the initial Sentry provider accepted a DSN and one file as proof of readiness,
+  described an in-memory test harness as a delivering client, put Convex setup in its
+  environment instead of its dashboard integration, and did not prove release or
+  source-map configuration.
+- fix: the provider now validates one browser, server, edge, privacy, release, and
+  source-map blueprint; uses the official SDK downstream; treats the local client as a
+  test harness only; and records Convex's dashboard integration as a human attestation.
+- prevention: provider and preflight tests reject partial runtime files, public auth
+  tokens, missing build identifiers, local-development noise, stale README setup, and
+  unsupported provider selections. The README sync gate now covers observability.
+- status: open

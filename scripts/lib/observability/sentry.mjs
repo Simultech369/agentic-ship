@@ -1,9 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { loadConnectionCatalog } from "../connections/catalog.mjs";
-
-const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 export const SENTRY_PUBLIC_DSN_ENV = "NEXT_PUBLIC_SENTRY_DSN";
 export const SENTRY_SERVER_DSN_ENV = "SENTRY_DSN";
@@ -435,7 +430,7 @@ export function createSentryBeforeSend(customFilter) {
 // ── 3. Synthetic Error Verification Event Generator ──────────────────────────────
 
 /**
- * Generate a synthetic Sentry verification event for testing pipeline delivery and redaction.
+ * Generate a synthetic event for local scrubber tests or capture through the official SDK.
  *
  * @param {{
  *   message?: string,
@@ -557,7 +552,7 @@ export function createSyntheticVerificationEvent({
  *
  * @param {object|Error|string} eventOrError
  * @param {{ dsn?: string, beforeSend?: Function }} [options]
- * @returns {{ delivered: boolean, eventId: string, scrubbedEvent: object }}
+ * @returns {{ acceptedByScrubber: boolean, eventId: string, scrubbedEvent: object }}
  */
 export function simulateSentryCapture(eventOrError, { dsn, beforeSend } = {}) {
   let event;
@@ -571,7 +566,7 @@ export function simulateSentryCapture(eventOrError, { dsn, beforeSend } = {}) {
   const processed = hook(event, {});
 
   return {
-    delivered: Boolean(processed),
+    acceptedByScrubber: Boolean(processed),
     eventId: event.event_id,
     scrubbedEvent: processed,
   };
@@ -580,12 +575,12 @@ export function simulateSentryCapture(eventOrError, { dsn, beforeSend } = {}) {
 // ── 4. Optional Sentry Client Wrapper ───────────────────────────────────────────
 
 /**
- * Create a safe, optional Sentry client.
- * Returns a no-op client if DSN is absent or enabled=false; returns an active client wrapper if DSN is valid.
+ * Create an in-memory Sentry test harness. This never sends an event to Sentry.
+ * Downstream runtime code uses the official SDK and the blueprint contract below.
  *
  * @param {{ dsn?: string, enabled?: boolean, environment?: string, release?: string, beforeSend?: Function }} options
  */
-export function createSentryClient(options = {}) {
+export function createSentryTestClient(options = {}) {
   const { dsn, enabled = true, environment = "development", release = "0.1.0", beforeSend } = options;
   const isEnabled = Boolean(enabled && dsn && isValidSentryDsn(dsn));
   const hook = beforeSend || createSentryBeforeSend();
@@ -670,7 +665,56 @@ export function createSentryClient(options = {}) {
   };
 }
 
-// ── 5. Environment & Coherence Inspection ───────────────────────────────────────
+// ── 5. Downstream Blueprint & Environment Inspection ────────────────────────────
+
+function parsePackageJson(source) {
+  try {
+    return JSON.parse(source || "{}");
+  } catch {
+    return {};
+  }
+}
+
+export function inspectSentryBlueprint({
+  packageJsonSource = "",
+  observabilitySource = "",
+  clientSource = "",
+  serverSource = "",
+  edgeSource = "",
+  nextConfigSource = "",
+} = {}) {
+  const sources = [packageJsonSource, observabilitySource, clientSource, serverSource, edgeSource, nextConfigSource];
+  const configured = sources.some((source) => /@sentry\/nextjs|Sentry\.init|withSentryConfig/.test(source));
+  if (!configured) return { status: "SKIP", detail: "Sentry is not configured (observability is optional)." };
+
+  const pkg = parsePackageJson(packageJsonSource);
+  const dependencies = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
+  const failures = [];
+  if (!dependencies["@sentry/nextjs"]) failures.push("@sentry/nextjs dependency");
+  if (!/export\s+(?:function|const)\s+scrubSentryEvent/.test(observabilitySource)) failures.push("shared scrubSentryEvent seam");
+  if (!/authorization|cookie/i.test(observabilitySource) || !/prompt|transcript/i.test(observabilitySource)) {
+    failures.push("credential and agent-data redaction");
+  }
+
+  for (const [name, source] of [["browser", clientSource], ["server", serverSource], ["edge", edgeSource]]) {
+    if (!/Sentry\.init\s*\(/.test(source)) failures.push(`${name} initialization`);
+    if (!/beforeSend\s*:/.test(source) || !/scrubSentryEvent/.test(source)) failures.push(`${name} beforeSend scrubber`);
+    if (!/environment\s*:/.test(source) || !/release\s*:/.test(source)) failures.push(`${name} environment and release`);
+    if (/sendDefaultPii\s*:\s*true/.test(source)) failures.push(`${name} PII default`);
+  }
+
+  if (!/SENTRY_ENABLE_DEV/.test(clientSource) || !/enabled\s*:/.test(clientSource)) failures.push("quiet local-development guard");
+  if (/SENTRY_AUTH_TOKEN/.test(clientSource)) failures.push("browser auth-token isolation");
+  if (!/withSentryConfig/.test(nextConfigSource)) failures.push("withSentryConfig source-map integration");
+  for (const envName of ["SENTRY_AUTH_TOKEN", "SENTRY_ORG", "SENTRY_PROJECT", "SENTRY_RELEASE"]) {
+    if (!nextConfigSource.includes(envName)) failures.push(`${envName} build configuration`);
+  }
+
+  const unique = [...new Set(failures)];
+  return unique.length
+    ? { status: "FAIL", detail: `Sentry blueprint is incomplete: ${unique.join(", ")}.` }
+    : { status: "PASS", detail: "Sentry browser, server, edge, privacy, release, and source-map contracts are complete." };
+}
 
 function parseEnv(stdout) {
   const values = new Map();
@@ -685,10 +729,10 @@ function parseEnv(stdout) {
  * Check whether observability environment variables are coherent.
  *
  * @param {Iterable<string>} envNames
- * @param {{ selectedProvider?: string, catalogDirectory?: string }} [options]
+ * @param {{ selectedProvider?: string }} [options]
  * @returns {{ status: "PASS"|"WARN"|"FAIL", detail: string, provider: string }}
  */
-export function inspectObservabilityCoherence(envNames, { selectedProvider, catalogDirectory } = {}) {
+export function inspectObservabilityCoherence(envNames, { selectedProvider } = {}) {
   const names = new Set(envNames ?? []);
   const has = (name) => names.has(name);
 
@@ -727,10 +771,9 @@ export function inspectObservabilityCoherence(envNames, { selectedProvider, cata
  * Audit production deployment environment for Sentry / Observability.
  *
  * @param {string|Map<string, string>} stdout
- * @param {{ catalogDirectory?: string }} [options]
  * @returns {{ status: "PASS"|"WARN"|"FAIL"|"SKIP", detail: string, provider: string }}
  */
-export function inspectProductionObservabilityEnvironment(stdout, { catalogDirectory } = {}) {
+export function inspectProductionObservabilityEnvironment(stdout) {
   const values = typeof stdout === "string" ? parseEnv(stdout) : stdout;
   const has = (k) => values.has(k) && (values.get(k) ?? "").trim().length > 0;
   const val = (k) => (values.get(k) ?? "").trim();
@@ -755,24 +798,22 @@ export function inspectProductionObservabilityEnvironment(stdout, { catalogDirec
     };
   }
 
-  if (dsn) {
-    if (!isValidSentryDsn(dsn)) {
-      return {
-        status: "FAIL",
-        provider: "sentry",
-        detail: `Production Sentry DSN "${dsn}" is not a valid HTTPS Sentry DSN URL.`,
-      };
-    }
-    return {
-      status: "PASS",
-      provider: "sentry",
-      detail: "Production Sentry DSN is valid and auth token is properly isolated.",
-    };
+  if (!isValidSentryDsn(dsn)) {
+    return { status: "FAIL", provider: "sentry", detail: "Production Sentry DSN is missing or is not a valid HTTPS Sentry DSN URL." };
+  }
+
+  const required = [SENTRY_AUTH_TOKEN_ENV, "SENTRY_ORG", "SENTRY_PROJECT", "SENTRY_RELEASE"];
+  const missing = required.filter((name) => !has(name));
+  if (missing.length > 0) {
+    return { status: "FAIL", provider: "sentry", detail: `Production Sentry build configuration is missing: ${missing.join(", ")}.` };
+  }
+  if (!isSensitiveSentryToken(val(SENTRY_AUTH_TOKEN_ENV))) {
+    return { status: "FAIL", provider: "sentry", detail: "SENTRY_AUTH_TOKEN is not a recognized Sentry organization token." };
   }
 
   return {
-    status: "WARN",
+    status: "PASS",
     provider: "sentry",
-    detail: "Sentry provider selected but SENTRY_DSN is not set.",
+    detail: "Production Sentry DSN, release, project, organization, and source-map credential are configured.",
   };
 }
